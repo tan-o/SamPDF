@@ -1,0 +1,15 @@
+*.iml
+.gradle/
+.gradle-user/
+.idea/
+local.properties
+**/build/
+captures/
+.externalNativeBuild/
+.cxx/
+logs/
+native-layout/target/
+tmp/
+.tmp/
+__pycache__/
+*.py[cod]
