@@ -49,3 +49,45 @@ internal object RustPdfTextExtractor {
         }
     }
 }
+
+/** Native text cells as normalized lines, with one glyph per non-whitespace character when the word cells align. */
+internal fun RustPdfTextPage.toPositionedLines(): List<PositionedLine> {
+    if (width <= 0f || height <= 0f) return emptyList()
+    return lines.mapNotNull { cell ->
+        val text = cell.text.trim().takeIf(String::isNotEmpty) ?: return@mapNotNull null
+        val wordGlyphs = words.asSequence()
+            .filter { word ->
+                val centerY = (word.top + word.bottom) / 2f
+                centerY in (cell.top - 1f)..(cell.bottom + 1f) &&
+                    minOf(word.right, cell.right) > maxOf(word.left, cell.left)
+            }
+            .sortedBy(RustPdfTextCell::left)
+            .flatMap { word ->
+                val characters = word.text.filterNot(Char::isWhitespace).toList()
+                val step = (word.right - word.left) / characters.size.coerceAtLeast(1)
+                characters.mapIndexed { index, character ->
+                    PositionedGlyph(
+                        text = character.toString(),
+                        left = (word.left + step * index) / width,
+                        top = word.top / height,
+                        right = (word.left + step * (index + 1)) / width,
+                        bottom = word.bottom / height,
+                        confidence = 1f,
+                    )
+                }
+            }
+            .toList()
+        val glyphs = wordGlyphs.takeIf {
+            it.joinToString("", transform = PositionedGlyph::text) == text.filterNot(Char::isWhitespace)
+        }.orEmpty()
+        PositionedLine(
+            text = text,
+            left = cell.left / width,
+            top = cell.top / height,
+            right = cell.right / width,
+            bottom = cell.bottom / height,
+            confidence = 1f,
+            glyphs = glyphs,
+        )
+    }
+}

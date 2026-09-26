@@ -1,7 +1,5 @@
 package com.samreader.app.document
 
-import com.samreader.app.data.LayoutBlockType
-
 internal enum class CanonicalBlockSource {
     NATIVE_PDF,
     VISUAL_OCR,
@@ -60,28 +58,27 @@ internal fun requiresVisualOcr(
     return regions.indices.any { regions[it].requiresOcr && native.sources[it] != CanonicalBlockSource.NATIVE_PDF }
 }
 
+/**
+ * Fills source text into layout regions at glyph granularity, the span-to-block pattern used by
+ * MinerU: every glyph belongs to the highest-ranked region whose instance mask owns its center
+ * (see [LayoutRegion.glyphOwnershipRank]). A source line that crosses a region boundary, such as
+ * a PDF text cell spanning a column gutter or ending in an equation number, is split so that each
+ * region keeps only its own characters, in the source order. Glyphs outside every mask stay with
+ * their line neighbours. Lines without aligned glyphs are owned as a whole by their center.
+ */
 internal fun assignLinesToRegions(
     regions: List<LayoutRegion>,
     lines: List<PositionedLine>,
 ): List<PositionedBlock> {
     val assigned = Array(regions.size) { mutableListOf<PositionedLine>() }
-    val textRegionIndices = regions.indices.filter { regions[it].requiresOcr }
     lines.forEach { line ->
-        val points = line.glyphs.takeIf(List<PositionedGlyph>::isNotEmpty)?.map { glyph ->
-            (glyph.left + glyph.right) / 2f to (glyph.top + glyph.bottom) / 2f
-        } ?: listOf((line.left + line.right) / 2f to (line.top + line.bottom) / 2f)
-        val best = textRegionIndices.mapNotNull { index ->
-            val region = regions[index]
-            val ownedPoints = points.count { (x, y) -> region.ownsPoint(x, y) }
-            if (ownedPoints == 0) null else LineOwner(index, ownedPoints, region.score)
-        }.maxWithOrNull(compareBy(LineOwner::ownedPoints, LineOwner::regionConfidence))?.regionIndex
-        if (best != null) assigned[best] += line
+        line.splitByOwner(regions).forEach { (owner, part) ->
+            if (regions[owner].requiresOcr || regions[owner].label == "display_formula") assigned[owner] += part
+        }
     }
     return regions.mapIndexed { index, region ->
         PositionedBlock(
             // Both ML Kit OCR and the native PDF extractor already expose a source reading order.
-            // Re-sorting here destroys that order when adjacent OCR lines have slightly different
-            // left edges (indents, formulas, or justified text).
             lines = assigned[index].toList(),
             left = region.left,
             top = region.top,
@@ -96,11 +93,32 @@ internal fun assignLinesToRegions(
     }
 }
 
-private data class LineOwner(
-    val regionIndex: Int,
-    val ownedPoints: Int,
-    val regionConfidence: Float,
-)
+private fun PositionedLine.splitByOwner(regions: List<LayoutRegion>): List<Pair<Int, PositionedLine>> {
+    if (!hasAlignedGlyphs) {
+        val owner = ownerAt(regions, (left + right) / 2f, (top + bottom) / 2f) ?: return emptyList()
+        return listOf(owner to this)
+    }
+    val owners = glyphs.map { ownerAt(regions, it.centerX, it.centerY) }.toMutableList()
+    if (owners.all { it == null }) return emptyList()
+    // Unowned glyphs (mask edges, rounding) follow the preceding owned glyph, else the next one.
+    for (index in owners.indices) if (owners[index] == null) owners[index] = owners.getOrNull(index - 1)
+    for (index in owners.indices.reversed()) if (owners[index] == null) owners[index] = owners.getOrNull(index + 1)
+    if (owners.distinct().size == 1) return listOf(requireNotNull(owners.first()) to this)
+    val parts = mutableListOf<Pair<Int, PositionedLine>>()
+    var runStart = 0
+    for (index in 1..owners.size) {
+        if (index == owners.size || owners[index] != owners[runStart]) {
+            sliceGlyphs(runStart, index)?.let { parts += requireNotNull(owners[runStart]) to it }
+            runStart = index
+        }
+    }
+    return parts
+}
+
+private fun ownerAt(regions: List<LayoutRegion>, x: Float, y: Float): Int? =
+    regions.indices
+        .filter { regions[it].glyphOwnershipRank > 0 && regions[it].ownsPoint(x, y) }
+        .maxWithOrNull(compareBy<Int> { regions[it].glyphOwnershipRank }.thenBy { regions[it].score })
 
 private fun PositionedBlock.hasReliableNativeText(): Boolean {
     if (lines.isEmpty()) return false

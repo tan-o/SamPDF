@@ -7,7 +7,6 @@ package com.samreader.app.document
  */
 internal fun assembleTypedSpans(
     canonicalText: CanonicalPageText,
-    regions: List<LayoutRegion>,
     formulaOwners: Map<Int, List<RecognizedFormula>>,
 ): List<PositionedBlock> {
     val placements = formulaOwners.entries.flatMap { (owner, formulas) ->
@@ -16,15 +15,11 @@ internal fun assembleTypedSpans(
     val consumed = BooleanArray(placements.size)
     val inserted = BooleanArray(placements.size)
     val intersectsUnconsumedText = BooleanArray(placements.size)
-    val formulaNumbers = regions.filter { it.label == "formula_number" }
 
     val assembled = canonicalText.blocks.mapIndexed { blockIndex, block ->
         val source = canonicalText.sources.getOrElse(blockIndex) { CanonicalBlockSource.NONE }
         block.copy(lines = buildList {
             block.lines.forEach { line ->
-                if (formulaNumbers.any { number -> line.isFullyOwnedBy(number) }) {
-                    return@forEach
-                }
                 val owner = placements.indices
                     .filter { index ->
                         placements[index].ownerIndex == blockIndex &&
@@ -89,9 +84,7 @@ private fun PositionedLine.replaceOwnedOcrGlyphs(
     consumed: BooleanArray,
     inserted: BooleanArray,
 ): List<PositionedLine>? {
-    if (glyphs.isEmpty()) return null
-    val characterIndices = text.indices.filterNot { text[it].isWhitespace() }
-    if (characterIndices.size != glyphs.size) return null
+    if (!hasAlignedGlyphs) return null
     val ranges = placements.indices.mapNotNull { index ->
         val placement = placements[index]
         if (placement.ownerIndex != blockIndex || placement.formula.region.type != FormulaRegionType.INLINE) {
@@ -102,55 +95,27 @@ private fun PositionedLine.replaceOwnedOcrGlyphs(
             placement.formula.region.contains(glyph.centerX, glyph.centerY)
         }
         if (owned.isEmpty()) return@mapNotNull null
-        val firstGlyph = owned.first()
-        val lastGlyph = owned.last()
-        if (owned.size != lastGlyph - firstGlyph + 1) return@mapNotNull null
-        FormulaTextRange(index, characterIndices[firstGlyph], characterIndices[lastGlyph])
-    }.sortedBy(FormulaTextRange::start)
-    if (ranges.isEmpty() || ranges.zipWithNext().any { (a, b) -> a.end >= b.start }) return null
+        if (owned.size != owned.last() - owned.first() + 1) return@mapNotNull null
+        FormulaGlyphRange(index, owned.first(), owned.last() + 1)
+    }.sortedBy(FormulaGlyphRange::start)
+    if (ranges.isEmpty() || ranges.zipWithNext().any { (a, b) -> a.end > b.start }) return null
 
     return buildList {
         var cursor = 0
         ranges.forEach { range ->
-            addTextSlice(this@replaceOwnedOcrGlyphs, characterIndices, cursor, range.start)
+            sliceGlyphs(cursor, range.start)?.let(::add)
             if (!inserted[range.placementIndex]) {
                 add(placements[range.placementIndex].formula.toPositionedLine())
                 inserted[range.placementIndex] = true
             }
             consumed[range.placementIndex] = true
-            cursor = range.end + 1
+            cursor = range.end
         }
-        addTextSlice(this@replaceOwnedOcrGlyphs, characterIndices, cursor, text.length)
+        sliceGlyphs(cursor, glyphs.size)?.let(::add)
     }
 }
 
-private fun MutableList<PositionedLine>.addTextSlice(
-    source: PositionedLine,
-    characterIndices: List<Int>,
-    start: Int,
-    endExclusive: Int,
-) {
-    var contentStart = start
-    var contentEnd = endExclusive
-    while (contentStart < contentEnd && source.text[contentStart].isWhitespace()) contentStart++
-    while (contentEnd > contentStart && source.text[contentEnd - 1].isWhitespace()) contentEnd--
-    if (contentStart == contentEnd) return
-    val sliceGlyphs = source.glyphs.filterIndexed { index, _ ->
-        characterIndices[index] in contentStart until contentEnd
-    }
-    if (sliceGlyphs.isEmpty()) return
-    add(source.copy(
-        text = source.text.substring(contentStart, contentEnd),
-        left = sliceGlyphs.minOf(PositionedGlyph::left),
-        top = sliceGlyphs.minOf(PositionedGlyph::top),
-        right = sliceGlyphs.maxOf(PositionedGlyph::right),
-        bottom = sliceGlyphs.maxOf(PositionedGlyph::bottom),
-        confidence = sliceGlyphs.map(PositionedGlyph::confidence).average().toFloat(),
-        glyphs = sliceGlyphs,
-    ))
-}
-
-private data class FormulaTextRange(
+private data class FormulaGlyphRange(
     val placementIndex: Int,
     val start: Int,
     val end: Int,
@@ -200,16 +165,12 @@ private fun RecognizedFormula.toPositionedLine(): PositionedLine = PositionedLin
     right = region.right,
     bottom = region.bottom,
     confidence = confidence,
-    glyphs = listOf(PositionedGlyph(latex, region.left, region.top, region.right, region.bottom, confidence)),
+    isFormula = true,
 )
 
 private fun PositionedLine.isFullyOwnedBy(region: FormulaRegion): Boolean =
     glyphs.isNotEmpty() && region.containsBounds(left, top, right, bottom) &&
         glyphs.all { glyph -> region.contains(glyph.centerX, glyph.centerY) }
-
-private fun PositionedLine.isFullyOwnedBy(region: LayoutRegion): Boolean =
-    glyphs.isNotEmpty() && region.containsBounds(left, top, right, bottom) &&
-        glyphs.all { glyph -> region.ownsPoint(glyph.centerX, glyph.centerY) }
 
 private fun PositionedLine.intersects(region: FormulaRegion): Boolean = if (glyphs.isNotEmpty()) {
     glyphs.any { glyph -> region.contains(glyph.centerX, glyph.centerY) }
@@ -230,19 +191,6 @@ private fun FormulaRegion.containsBounds(
     candidateTop >= top - MODEL_COORDINATE_TOLERANCE &&
     candidateRight <= right + MODEL_COORDINATE_TOLERANCE &&
     candidateBottom <= bottom + MODEL_COORDINATE_TOLERANCE
-
-private fun LayoutRegion.containsBounds(
-    candidateLeft: Float,
-    candidateTop: Float,
-    candidateRight: Float,
-    candidateBottom: Float,
-): Boolean = candidateLeft >= left - MODEL_COORDINATE_TOLERANCE &&
-    candidateTop >= top - MODEL_COORDINATE_TOLERANCE &&
-    candidateRight <= right + MODEL_COORDINATE_TOLERANCE &&
-    candidateBottom <= bottom + MODEL_COORDINATE_TOLERANCE
-
-private val PositionedGlyph.centerX: Float get() = (left + right) / 2f
-private val PositionedGlyph.centerY: Float get() = (top + bottom) / 2f
 
 // PP-DocLayoutV3 predicts on an 800x800 grid. Two grid cells absorb raster/box rounding only.
 private const val MODEL_COORDINATE_TOLERANCE = 2f / 800f

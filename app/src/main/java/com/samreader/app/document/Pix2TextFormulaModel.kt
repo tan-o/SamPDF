@@ -16,33 +16,6 @@ import kotlin.math.ln
 import kotlin.math.max
 import org.json.JSONObject
 
-internal object FormulaRegionType {
-    const val INLINE = "INLINE"
-    const val DISPLAY = "DISPLAY"
-}
-
-internal data class FormulaRegion(
-    val type: String,
-    val confidence: Float,
-    val left: Float,
-    val top: Float,
-    val right: Float,
-    val bottom: Float,
-)
-
-internal data class RecognizedFormula(
-    val region: FormulaRegion,
-    val latex: String,
-    val confidence: Float,
-    val modelId: String,
-    val imagePng: ByteArray,
-)
-
-internal data class FormulaPageRecognition(
-    val regions: List<FormulaRegion>,
-    val formulas: List<RecognizedFormula>,
-)
-
 /** Pix2Text 1.5 formula detection and image-to-LaTeX, executed entirely with Android ONNX Runtime. */
 internal object Pix2TextFormulaModel {
     const val RECOGNIZER_ID = "pix2text-mfr-1.5-semantic"
