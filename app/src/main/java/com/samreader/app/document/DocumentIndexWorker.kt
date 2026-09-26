@@ -57,73 +57,47 @@ class DocumentIndexWorker(
         val backgroundEnabled = dao.getAppSetting(BACKGROUND_INDEXING)?.toBooleanStrictOrNull() ?: true
         val showNotificationProgress = dao.getAppSetting(SHOW_NOTIFICATION_PROGRESS)?.toBooleanStrictOrNull() ?: true
         val layoutConfidence = container.parsingDebugSettings.getDocumentLayoutConfidence(documentId)
-        val resumePage = (document.processedPages - 1).coerceAtLeast(0)
-        if (backgroundEnabled) setForeground(foregroundInfo(document.id, document.title, document.processedPages, document.pageCount, showNotificationProgress))
-        dao.updateDocumentProgress(
-            id = documentId, status = DocumentStatus.INDEXING, processedPages = document.processedPages,
+        val existingSentences = dao.getDocumentSentences(documentId)
+        val correctedTexts = existingSentences.mapNotNull { sentence -> sentence.correctedText?.let { sentence.id to it } }.toMap()
+        val startPage = SentenceStream.resumePage(
+            committedPages = document.processedPages,
+            sentencePages = existingSentences.map { sentence -> sentence.pageNumber to sentence.decodedPages() },
         )
+        dao.deleteSentencesFromPage(documentId, startPage)
+        if (backgroundEnabled) setForeground(foregroundInfo(document.id, document.title, startPage, document.pageCount, showNotificationProgress))
+        dao.updateDocumentProgress(id = documentId, status = DocumentStatus.INDEXING, processedPages = startPage)
 
         val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
-        val boundaryScorer = WtpSentenceBoundaryModel(applicationContext)
-        val sentenceFragments = mutableListOf<Pair<Int, List<PositionedSentence>>>()
-        val existingSentences = dao.getDocumentSentences(documentId).associateBy(SentenceEntity::id)
-        var persistedSentences = existingSentences.values.toList()
+        val sentences = SentenceStream(WtpSentenceBoundaryModel(applicationContext))
         try {
             val rustPages = runCatching { RustPdfTextExtractor.extract(file.absolutePath) }
                 .onFailure { error -> Log.w("SamReaderIndex", "Rust PDF text extraction failed", error) }
                 .getOrDefault(emptyList())
             ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY).use { descriptor ->
                 PdfRenderer(descriptor).use { renderer ->
-                    for (pageNumber in resumePage until renderer.pageCount) {
+                    for (pageNumber in startPage until renderer.pageCount) {
                         if (isStopped) return@withContext Result.success()
                         renderer.openPage(pageNumber).use { page ->
                             val rustPage = rustPages.getOrNull(pageNumber)
-                            val rustLines = rustPage?.toPositionedLines().orEmpty()
-                            val textEvidence = rustLines
-                            val recognizedPage = recognizePage(page, recognizer, layoutConfidence, rustLines)
-                            val canonicalText = resolveCanonicalText(
-                                regions = recognizedPage.regions,
-                                nativeLines = rustLines,
-                                ocrLines = recognizedPage.ocrLines,
-                            )
-                            val ownedFormulas = assignFormulasToRegions(
-                                recognizedPage.regions,
-                                recognizedPage.formulas,
-                            )
-                            val correctedBlocks = assembleTypedSpans(
-                                canonicalText,
-                                recognizedPage.regions,
-                                ownedFormulas,
-                            )
-                            val encodedBlocks = correctedBlocks.mapIndexed { index, block ->
-                                if (block.type == LayoutBlockType.EQUATION && block.selectableBody) {
-                                    val formulas = ownedFormulas[index].orEmpty()
-                                    val formulaWasOwnedElsewhere = formulas.isEmpty() &&
-                                        recognizedPage.formulas.any { blockOverlap(block, it.region) >= .2f }
-                                    if (formulaWasOwnedElsewhere) {
-                                        block.copy(lines = emptyList(), selectableBody = false)
-                                    } else {
-                                        encodeEquationBlock(block, textEvidence, formulas)
-                                    }
-                                } else block
-                            }
-                            val layoutBlocks = PageSemanticRefiner.refine(
-                                blocks = encodedBlocks,
+                            val nativeLines = rustPage?.toPositionedLines().orEmpty()
+                            val recognizedPage = recognizePage(page, recognizer, layoutConfidence, nativeLines)
+                            val layoutBlocks = PageParser.parse(
                                 pageNumber = pageNumber,
+                                regions = recognizedPage.regions,
+                                nativeLines = nativeLines,
+                                ocrLines = recognizedPage.ocrLines,
+                                formulas = recognizedPage.formulas,
                             )
-                            val sentencesInLayout = SentenceAssembler.assembleBlocks(
-                                layoutBlocks,
-                                boundaryScorer,
-                            )
-                            sentenceFragments += pageNumber to sentencesInLayout
+                            val committed = sentences.addPage(pageNumber, layoutBlocks).toMutableList()
+                            if (pageNumber == renderer.pageCount - 1) committed += sentences.finish()
                             val quality = layoutBlocks.flatMap(PositionedBlock::lines)
                                 .map(PositionedLine::confidence).takeIf(List<Float>::isNotEmpty)
-                                ?.average()?.toFloat() ?: if (rustLines.isNotEmpty()) 1f else 0f
+                                ?.average()?.toFloat() ?: if (nativeLines.isNotEmpty()) 1f else 0f
                             Log.i(
                                 "SamReaderIndex",
                                 "page=${pageNumber + 1} visualBlocks=${layoutBlocks.size} " +
                                     "bodyBlocks=${layoutBlocks.count(PositionedBlock::selectableBody)} " +
-                                    "sentences=${sentencesInLayout.size}",
+                                    "committedSentences=${committed.size}",
                             )
                             val evidence = ParseEvidenceBuilder(
                                 documentId, pageNumber, page.width, page.height,
@@ -136,20 +110,17 @@ class DocumentIndexWorker(
                                     recognizedPage.formulas,
                                 )
                             }.build()
-                            val persistedBlocks = buildList {
-                                layoutBlocks.forEachIndexed { index, block ->
-                                    val text = if (block.type !in IMAGE_BLOCK_TYPES) {
+                            val persistedBlocks = layoutBlocks.mapIndexed { index, block ->
+                                PageLayoutBlockEntity(
+                                    documentId, pageNumber, index,
+                                    block.type,
+                                    block.left, block.top, block.right, block.bottom,
+                                    if (block.type !in IMAGE_BLOCK_TYPES) {
                                         block.lines.joinToString("\n", transform = PositionedLine::text)
-                                    } else ""
-                                    add(PageLayoutBlockEntity(
-                                        documentId, pageNumber, index,
-                                        block.type,
-                                        block.left, block.top, block.right, block.bottom,
-                                        text,
-                                    ))
-                                }
+                                    } else "",
+                                )
                             }
-
+                            val entities = committed.map { it.toEntity(documentId, correctedTexts) }
                             dao.replacePage(
                                 page = PageEntity(
                                     documentId = documentId,
@@ -161,27 +132,16 @@ class DocumentIndexWorker(
                                 ),
                                 blocks = persistedBlocks,
                                 evidence = evidence,
-                                sentences = emptyList(),
+                                sentences = entities,
+                                spans = entities.flatMap { SentenceSpanParser.parse(it.id, it.originalText) },
                             )
-
-                            val merged = SentenceAssembler.mergePages(
-                                sentenceFragments,
-                                includeTrailingIncomplete = pageNumber == renderer.pageCount - 1,
-                                boundaryScorer = boundaryScorer,
-                            )
-                            persistedSentences = merged.toEntities(documentId, existingSentences)
-                            val spans = persistedSentences.flatMap { sentence ->
-                                SentenceSpanParser.parse(sentence.id, sentence.originalText)
-                            }
-                            if (persistedSentences.isNotEmpty()) {
-                                dao.replaceDocumentSentences(persistedSentences, spans)
-                            }
                         }
                         dao.updateDocumentProgressIfStatus(
                             id = documentId,
                             expectedStatus = DocumentStatus.INDEXING,
                             newStatus = DocumentStatus.INDEXING,
-                            processedPages = maxOf(document.processedPages, pageNumber + 1),
+                            // Pages holding a still-open sentence are re-parsed after an interruption.
+                            processedPages = sentences.firstOpenPage ?: (pageNumber + 1),
                         )
                         if (backgroundEnabled) {
                             setForeground(foregroundInfo(document.id, document.title, pageNumber + 1, renderer.pageCount, showNotificationProgress))
@@ -189,12 +149,13 @@ class DocumentIndexWorker(
                     }
                 }
             }
+            val hasSentences = dao.getDocumentSentences(documentId).isNotEmpty()
             dao.updateDocumentProgressIfStatus(
                 id = documentId,
                 expectedStatus = DocumentStatus.INDEXING,
-                newStatus = if (persistedSentences.isNotEmpty()) DocumentStatus.READY else DocumentStatus.FAILED,
+                newStatus = if (hasSentences) DocumentStatus.READY else DocumentStatus.FAILED,
                 processedPages = document.pageCount,
-                errorMessage = if (persistedSentences.isNotEmpty()) null else "布局模型和区域 OCR 未生成正文句子",
+                errorMessage = if (hasSentences) null else "布局模型和区域 OCR 未生成正文句子",
             )
             Result.success()
         } catch (cancelled: CancellationException) {
@@ -288,100 +249,6 @@ class DocumentIndexWorker(
             }
     }
 
-    private fun encodeEquationBlock(
-        block: PositionedBlock,
-        native: List<PositionedLine>,
-        formulas: List<RecognizedFormula>,
-    ): PositionedBlock {
-        val visual = formulas.asSequence()
-            .filter { it.region.type == FormulaRegionType.DISPLAY }
-            .map { it to blockOverlap(block, it.region) }
-            .maxByOrNull { it.second }
-            ?.takeIf { it.second >= .2f }
-            ?.first
-        if (visual != null) {
-            val formula = visual.region
-            val glyphs = visual.latex.filterNot(Char::isWhitespace).map { character ->
-                PositionedGlyph(
-                    character.toString(), formula.left, formula.top, formula.right, formula.bottom,
-                    visual.confidence,
-                )
-            }
-            return block.copy(
-                lines = listOf(PositionedLine(
-                    text = visual.latex,
-                    left = formula.left,
-                    top = formula.top,
-                    right = formula.right,
-                    bottom = formula.bottom,
-                    confidence = visual.confidence,
-                    glyphs = glyphs,
-                )),
-                selectableBody = true,
-            )
-        }
-        val nativeEquation = native.filter { line ->
-            val centerX = (line.left + line.right) / 2f
-            val centerY = (line.top + line.bottom) / 2f
-            centerX in block.left..block.right && centerY in block.top..block.bottom
-        }.sortedWith(compareBy(PositionedLine::top, PositionedLine::left))
-        val source = (nativeEquation.ifEmpty { block.lines })
-            .joinToString(" ", transform = PositionedLine::text)
-        val latex = FormulaLatexEncoder.encode(source)
-        if (latex.isBlank()) return block.copy(lines = emptyList())
-        return block.copy(
-            lines = listOf(PositionedLine(
-                text = latex,
-                left = block.left,
-                top = block.top,
-                right = block.right,
-                bottom = block.bottom,
-                confidence = nativeEquation.takeIf(List<PositionedLine>::isNotEmpty)?.let { 1f }
-                    ?: block.lines.map(PositionedLine::confidence).average().toFloat(),
-            )),
-            selectableBody = true,
-        )
-    }
-
-    private fun blockOverlap(block: PositionedBlock, formula: FormulaRegion): Float {
-        val intersection = (minOf(block.right, formula.right) - maxOf(block.left, formula.left)).coerceAtLeast(0f) *
-            (minOf(block.bottom, formula.bottom) - maxOf(block.top, formula.top)).coerceAtLeast(0f)
-        val formulaArea = (formula.right - formula.left) * (formula.bottom - formula.top)
-        return if (formulaArea <= 0f) 0f else intersection / formulaArea
-    }
-
-
-    private fun List<DocumentPositionedSentence>.toEntities(
-        documentId: String,
-        existing: Map<String, SentenceEntity>,
-    ): List<SentenceEntity> {
-        val positions = mutableMapOf<Int, Int>()
-        return map { item ->
-            val position = positions.getOrDefault(item.firstPage, 0)
-            positions[item.firstPage] = position + 1
-            val id = UUID.nameUUIDFromBytes("$documentId:${item.firstPage}:$position".toByteArray()).toString()
-            SentenceEntity(
-                id = id,
-                documentId = documentId,
-                pageNumber = item.firstPage,
-                position = position,
-                originalText = item.text,
-                regions = item.regions.joinToString("|") { region ->
-                    listOf(
-                        region.pageNumber,
-                        region.rect.left.coerceIn(0f, 1f),
-                        region.rect.top.coerceIn(0f, 1f),
-                        region.rect.right.coerceIn(0f, 1f),
-                        region.rect.bottom.coerceIn(0f, 1f),
-                    ).joinToString(",")
-                },
-                source = "${TextSource.HYBRID_PDF_VISUAL}:${item.semanticRole}",
-                confidence = item.confidence,
-                correctedText = existing[id]?.correctedText,
-            )
-        }
-    }
-
     private fun foregroundInfo(documentId: String, title: String, processed: Int, total: Int, showProgress: Boolean): ForegroundInfo {
         val manager = applicationContext.getSystemService(NotificationManager::class.java)
         manager.createNotificationChannel(
@@ -442,47 +309,28 @@ private data class RecognizedPage(
     val formulas: List<RecognizedFormula>,
 )
 
-private fun RustPdfTextPage.toPositionedLines(): List<PositionedLine> {
-    if (width <= 0f || height <= 0f) return emptyList()
-    return lines.mapNotNull { cell ->
-        cell.text.trim().takeIf(String::isNotEmpty)?.let { text ->
-            val left = cell.left / width
-            val top = cell.top / height
-            val right = cell.right / width
-            val bottom = cell.bottom / height
-            val wordGlyphs = words.asSequence()
-                .filter { word ->
-                    val centerY = (word.top + word.bottom) / 2f
-                    centerY in (cell.top - 1f)..(cell.bottom + 1f) &&
-                        minOf(word.right, cell.right) > maxOf(word.left, cell.left)
-                }
-                .sortedBy(RustPdfTextCell::left)
-                .flatMap { word ->
-                    val characters = word.text.filterNot(Char::isWhitespace).toList()
-                    characters.mapIndexed { index, character ->
-                        PositionedGlyph(
-                            text = character.toString(),
-                            left = (word.left + word.right.minus(word.left) * index / characters.size.coerceAtLeast(1)) / width,
-                            top = word.top / height,
-                            right = (word.left + word.right.minus(word.left) * (index + 1) / characters.size.coerceAtLeast(1)) / width,
-                            bottom = word.bottom / height,
-                            confidence = 1f,
-                        )
-                    }
-                }
-                .toList()
-            val glyphs = wordGlyphs.takeIf {
-                it.joinToString("", transform = PositionedGlyph::text) == text.filterNot(Char::isWhitespace)
-            }.orEmpty()
-            PositionedLine(
-                text = text,
-                left = left,
-                top = top,
-                right = right,
-                bottom = bottom,
-                confidence = 1f,
-                glyphs = glyphs,
-            )
-        }
-    }
+private fun DocumentSentence.toEntity(documentId: String, correctedTexts: Map<String, String>): SentenceEntity {
+    val id = UUID.nameUUIDFromBytes("$documentId:$firstPage:$position".toByteArray()).toString()
+    return SentenceEntity(
+        id = id,
+        documentId = documentId,
+        pageNumber = firstPage,
+        position = position,
+        originalText = text,
+        regions = regions.joinToString("|") { region ->
+            listOf(
+                region.pageNumber,
+                region.rect.left.coerceIn(0f, 1f),
+                region.rect.top.coerceIn(0f, 1f),
+                region.rect.right.coerceIn(0f, 1f),
+                region.rect.bottom.coerceIn(0f, 1f),
+            ).joinToString(",")
+        },
+        source = "${TextSource.HYBRID_PDF_VISUAL}:$semanticRole",
+        confidence = confidence,
+        correctedText = correctedTexts[id],
+    )
 }
+
+private fun SentenceEntity.decodedPages(): Set<Int> =
+    regions.split('|').mapNotNullTo(mutableSetOf()) { it.substringBefore(',').toIntOrNull() }

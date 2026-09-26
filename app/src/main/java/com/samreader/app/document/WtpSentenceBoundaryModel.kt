@@ -13,13 +13,6 @@ import java.nio.channels.FileChannel
 import kotlin.math.exp
 import org.json.JSONObject
 
-interface SentenceBoundaryScorer {
-    val threshold: Float get() = .5f
-
-    /** Returns the probability that a sentence ends after each UTF-16 character in [text]. */
-    fun probabilities(text: String): FloatArray
-}
-
 /**
  * Local sentence-boundary inference using the official WtP BERT mini ONNX export.
  *

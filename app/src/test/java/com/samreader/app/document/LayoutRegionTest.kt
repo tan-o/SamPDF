@@ -80,9 +80,51 @@ class LayoutRegionTest {
         val number = positionedLine("(4)", .44f, .48f)
 
         val canonical = resolveCanonicalText(listOf(body, formulaNumber), listOf(number), emptyList())
-        val blocks = assembleTypedSpans(canonical, listOf(body, formulaNumber), emptyMap())
 
-        assertTrue(blocks.all { it.lines.isEmpty() })
+        assertTrue(canonical.blocks.all { it.lines.isEmpty() })
+    }
+
+    @Test
+    fun pdfLineCrossingTheColumnGutterIsSplitBetweenBothColumns() {
+        val leftColumn = region(22, mask = verticalMask(.05f, .48f)).copy(left = .05f, right = .48f, readingOrder = 0)
+        val rightColumn = region(22, mask = verticalMask(.52f, .95f)).copy(left = .52f, right = .95f, readingOrder = 1)
+        val merged = PositionedLine(
+            "ends here. Starts there",
+            .06f, .30f, .94f, .33f, 1f,
+            glyphs = listOf(
+                "ends" to .06f, "here." to .30f, "Starts" to .55f, "there" to .80f,
+            ).flatMap { (word, start) ->
+                word.mapIndexed { index, character ->
+                    PositionedGlyph(character.toString(), start + index * .02f, .30f, start + (index + 1) * .02f, .33f, 1f)
+                }
+            },
+        )
+
+        val blocks = assignLinesToRegions(listOf(leftColumn, rightColumn), listOf(merged))
+
+        assertEquals(listOf("ends here."), blocks[0].lines.map(PositionedLine::text))
+        assertEquals(listOf("Starts there"), blocks[1].lines.map(PositionedLine::text))
+        assertTrue(blocks[0].lines.single().right < .48f)
+        assertTrue(blocks[1].lines.single().left > .52f)
+    }
+
+    @Test
+    fun equationNumberGlyphsAtTheEndOfAPdfLineStayOutOfTheFormula() {
+        val formula = region(5, mask = verticalMask(.2f, .7f)).copy(left = .2f, right = .7f)
+        val number = region(11, mask = verticalMask(.85f, .9f)).copy(left = .85f, right = .9f)
+        val line = PositionedLine(
+            "E=mc (1)", .2f, .30f, .9f, .33f, 1f,
+            glyphs = "E=mc".mapIndexed { index, character ->
+                PositionedGlyph(character.toString(), .3f + index * .05f, .30f, .35f + index * .05f, .33f, 1f)
+            } + "(1)".mapIndexed { index, character ->
+                PositionedGlyph(character.toString(), .855f + index * .01f, .30f, .865f + index * .01f, .33f, 1f)
+            },
+        )
+
+        val blocks = assignLinesToRegions(listOf(formula, number), listOf(line))
+
+        assertEquals(listOf("E=mc"), blocks[0].lines.map(PositionedLine::text))
+        assertTrue(blocks[1].lines.isEmpty())
     }
 
     @Test
@@ -167,7 +209,7 @@ class LayoutRegionTest {
             "\\[x = u\\]", .99f, "test", byteArrayOf(),
         )
 
-        val result = assembleTypedSpans(resolved, layout, mapOf(0 to listOf(falsePositive)))
+        val result = assembleTypedSpans(resolved, mapOf(0 to listOf(falsePositive)))
 
         assertTrue(result.single().lines.any { it.text == original })
     }
@@ -189,7 +231,7 @@ class LayoutRegionTest {
             emptyList(),
         )
 
-        val result = assembleTypedSpans(resolved, layout, mapOf(0 to listOf(formula)))
+        val result = assembleTypedSpans(resolved, mapOf(0 to listOf(formula)))
 
         assertEquals(listOf("using the equation", formula.latex), result.single().lines.map { it.text })
     }
@@ -207,7 +249,7 @@ class LayoutRegionTest {
         )
         val resolved = resolveCanonicalText(layout, nativeFragments, emptyList())
 
-        val result = assembleTypedSpans(resolved, layout, mapOf(0 to listOf(formula)))
+        val result = assembleTypedSpans(resolved, mapOf(0 to listOf(formula)))
 
         assertEquals(listOf(formula.latex), result.single().lines.map(PositionedLine::text))
     }
@@ -222,7 +264,7 @@ class LayoutRegionTest {
         )
         val resolved = resolveCanonicalText(layout, listOf(original), emptyList())
 
-        val result = assembleTypedSpans(resolved, layout, mapOf(0 to listOf(formula)))
+        val result = assembleTypedSpans(resolved, mapOf(0 to listOf(formula)))
 
         assertEquals(listOf(original.text), result.single().lines.map(PositionedLine::text))
     }
@@ -237,7 +279,7 @@ class LayoutRegionTest {
         )
         val resolved = resolveCanonicalText(layout, emptyList(), listOf(ocr))
 
-        val result = assembleTypedSpans(resolved, layout, mapOf(0 to listOf(formula)))
+        val result = assembleTypedSpans(resolved, mapOf(0 to listOf(formula)))
 
         assertEquals(
             listOf("using", formula.latex, ", where n is the step"),
@@ -288,7 +330,7 @@ class LayoutRegionTest {
         )
         val resolved = resolveCanonicalText(layout, native, emptyList())
 
-        val result = assembleTypedSpans(resolved, layout, mapOf(0 to listOf(formula)))
+        val result = assembleTypedSpans(resolved, mapOf(0 to listOf(formula)))
 
         assertEquals(
             listOf("using the equation", formula.latex, ", where", "n", "indicates"),
@@ -349,6 +391,15 @@ class LayoutRegionTest {
     }
 
     companion object {
+        private fun verticalMask(left: Float, right: Float) =
+            ByteArray(LayoutRegion.MASK_SIZE * LayoutRegion.MASK_SIZE).also { mask ->
+                val x0 = (left * LayoutRegion.MASK_SIZE).toInt()
+                val x1 = (right * LayoutRegion.MASK_SIZE).toInt()
+                for (y in 0 until LayoutRegion.MASK_SIZE) for (x in x0 until x1) {
+                    mask[y * LayoutRegion.MASK_SIZE + x] = 1
+                }
+            }
+
         private fun horizontalMask(top: Float, bottom: Float) =
             ByteArray(LayoutRegion.MASK_SIZE * LayoutRegion.MASK_SIZE).also { mask ->
                 val y0 = (top * LayoutRegion.MASK_SIZE).toInt()

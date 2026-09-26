@@ -129,8 +129,8 @@ interface SamReaderDao {
     @Query("SELECT * FROM sentences WHERE id = :id")
     fun observeSentence(id: String): Flow<SentenceEntity?>
 
-    @Query("DELETE FROM sentences WHERE documentId = :documentId AND pageNumber = :pageNumber")
-    suspend fun deleteSentencesForPage(documentId: String, pageNumber: Int)
+    @Query("DELETE FROM sentences WHERE documentId = :documentId AND pageNumber >= :fromPage")
+    suspend fun deleteSentencesFromPage(documentId: String, fromPage: Int)
 
     @Query("DELETE FROM sentences WHERE documentId = :documentId")
     suspend fun deleteSentences(documentId: String)
@@ -166,25 +166,20 @@ interface SamReaderDao {
     @Upsert
     suspend fun insertSentences(sentences: List<SentenceEntity>)
 
-    @Query("DELETE FROM sentences WHERE documentId = :documentId AND pageNumber = :pageNumber AND id NOT IN (:retainedIds)")
-    suspend fun deleteStaleSentencesForPage(documentId: String, pageNumber: Int, retainedIds: List<String>)
-
     @Transaction
     suspend fun replacePage(
         page: PageEntity,
         blocks: List<PageLayoutBlockEntity>,
         evidence: List<PageEvidenceEntity>,
         sentences: List<SentenceEntity>,
+        spans: List<SentenceSpanEntity>,
     ) {
         deleteLayoutBlocksForPage(page.documentId, page.pageNumber)
         deleteEvidenceForPage(page.documentId, page.pageNumber)
         upsertPage(page)
         if (blocks.isNotEmpty()) insertLayoutBlocks(blocks)
         if (evidence.isNotEmpty()) insertPageEvidence(evidence)
-        if (sentences.isNotEmpty()) {
-            insertSentences(sentences)
-            deleteStaleSentencesForPage(page.documentId, page.pageNumber, sentences.map(SentenceEntity::id))
-        }
+        insertSentencesWithSpans(sentences, spans)
     }
 
     @Query("DELETE FROM pages WHERE documentId = :documentId")
@@ -203,7 +198,7 @@ interface SamReaderDao {
     suspend fun getSentenceSpans(sentenceId: String): List<SentenceSpanEntity>
 
     @Transaction
-    suspend fun replaceDocumentSentences(sentences: List<SentenceEntity>, spans: List<SentenceSpanEntity>) {
+    suspend fun insertSentencesWithSpans(sentences: List<SentenceEntity>, spans: List<SentenceSpanEntity>) {
         if (sentences.isNotEmpty()) insertSentences(sentences)
         if (spans.isNotEmpty()) insertSentenceSpans(spans)
     }

@@ -1,0 +1,44 @@
+name: Android
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The ONNX models are Git LFS objects; cache them so each run does not re-download ~300 MB.
+      - name: List LFS objects
+        run: git lfs ls-files --long | cut -d ' ' -f1 | sort > .lfs-assets-id
+      - uses: actions/cache@v4
+        with:
+          path: .git/lfs
+          key: lfs-${{ hashFiles('.lfs-assets-id') }}
+      - name: Pull LFS objects
+        run: git lfs pull
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: android-actions/setup-android@v3
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Unit tests and debug APK
+        run: |
+          chmod +x gradlew
+          ./gradlew testDebugUnitTest assembleDebug
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: unit-test-reports
+          path: app/build/reports/tests/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: app-debug-apk
+          path: app/build/outputs/apk/debug/app-debug.apk

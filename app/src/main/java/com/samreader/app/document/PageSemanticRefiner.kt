@@ -8,11 +8,7 @@ object PageSemanticRefiner {
         blocks: List<PositionedBlock>,
         pageNumber: Int = 0,
     ): List<PositionedBlock> {
-        val ordered = if (blocks.all { it.readingOrder != Int.MAX_VALUE }) {
-            blocks.sortedBy(PositionedBlock::readingOrder)
-        } else {
-            blocks
-        }
+        val ordered = blocks.sortedBy(PositionedBlock::readingOrder)
         return classifyContents(classifyFrontMatter(ordered, pageNumber))
     }
 
@@ -50,12 +46,7 @@ object PageSemanticRefiner {
         return normalized == "CONTENTS" || normalized == "TABLE OF CONTENTS"
     }
 
-    private fun PositionedBlock.precedes(other: PositionedBlock): Boolean =
-        if (readingOrder != Int.MAX_VALUE && other.readingOrder != Int.MAX_VALUE) {
-            readingOrder < other.readingOrder
-        } else {
-            top < other.top
-        }
+    private fun PositionedBlock.precedes(other: PositionedBlock): Boolean = readingOrder < other.readingOrder
 
     private fun PositionedBlock.overlapsColumn(other: PositionedBlock): Boolean {
         val overlap = (minOf(right, other.right) - maxOf(left, other.left)).coerceAtLeast(0f)
