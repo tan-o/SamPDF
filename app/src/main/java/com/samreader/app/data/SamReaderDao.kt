@@ -129,6 +129,24 @@ interface SamReaderDao {
     @Query("SELECT * FROM sentences WHERE id = :id")
     fun observeSentence(id: String): Flow<SentenceEntity?>
 
+    @Query("SELECT * FROM pages WHERE documentId = :documentId ORDER BY pageNumber")
+    fun observeDocumentPages(documentId: String): Flow<List<PageEntity>>
+
+    @Query("SELECT * FROM page_layout_blocks WHERE documentId = :documentId ORDER BY pageNumber, position")
+    fun observeDocumentLayoutBlocks(documentId: String): Flow<List<PageLayoutBlockEntity>>
+
+    @Query("SELECT translations.* FROM translations JOIN sentences ON sentences.id = translations.sentenceId WHERE sentences.documentId = :documentId")
+    fun observeDocumentTranslations(documentId: String): Flow<List<TranslationEntity>>
+
+    @Query(
+        """
+        SELECT * FROM page_evidence
+        WHERE documentId = :documentId AND pageNumber = :pageNumber AND kind IN ('WORD', 'OCR_LINE', 'OCR_GLYPH')
+        ORDER BY channel, position
+        """,
+    )
+    suspend fun getPageWordEvidence(documentId: String, pageNumber: Int): List<PageEvidenceEntity>
+
     @Query("DELETE FROM sentences WHERE documentId = :documentId AND pageNumber >= :fromPage")
     suspend fun deleteSentencesFromPage(documentId: String, fromPage: Int)
 

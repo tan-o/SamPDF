@@ -21,7 +21,7 @@ fun VocabularyScreen(viewModel: VocabularyViewModel, onBack: () -> Unit) {
             items(items, key = { it.id }) { item ->
                 Card(Modifier.fillMaxWidth()) { Row(Modifier.padding(14.dp)) {
                     Column(Modifier.weight(1f)) { Text(item.word, style = MaterialTheme.typography.titleMedium); if (item.note.isNotBlank()) Text(item.note) }
-                    TextButton(onClick = { lookupSamsungDictionary(context, item.word) }) { Text("词典") }
+                    TextButton(onClick = { lookupDictionary(context, item.word) }) { Text("词典") }
                     TextButton(onClick = { viewModel.delete(item) }) { Text("删除") }
                 } }
             }

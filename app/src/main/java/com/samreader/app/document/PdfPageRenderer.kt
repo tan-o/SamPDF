@@ -5,13 +5,17 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.ColorMatrix
 import android.graphics.ColorMatrixColorFilter
+import android.graphics.Matrix
 import android.graphics.Paint
 import android.graphics.pdf.PdfRenderer
 import android.os.ParcelFileDescriptor
 import androidx.core.graphics.createBitmap
+import com.samreader.app.data.NormalizedRect
 import java.io.File
 import kotlin.math.roundToInt
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
 object PdfPageRenderer {
@@ -44,6 +48,43 @@ object PdfPageRenderer {
                 }
             }
         }
+
+    /**
+     * Renders only [rect] (normalized page coordinates) of a page, [widthPixels] wide. The page
+     * is transformed so that the region fills the bitmap, which keeps small crops such as
+     * equations sharp without rasterizing the whole page at that scale.
+     */
+    suspend fun renderRegion(
+        filePath: String,
+        pageNumber: Int,
+        rect: NormalizedRect,
+        widthPixels: Int,
+    ): Bitmap = regionLock.withLock {
+        withContext(Dispatchers.IO) {
+            ParcelFileDescriptor.open(File(filePath), ParcelFileDescriptor.MODE_READ_ONLY).use { descriptor ->
+                PdfRenderer(descriptor).use { renderer ->
+                    require(pageNumber in 0 until renderer.pageCount)
+                    renderer.openPage(pageNumber).use { page ->
+                        val regionWidth = (rect.right - rect.left).coerceAtLeast(.001f) * page.width
+                        val regionHeight = (rect.bottom - rect.top).coerceAtLeast(.001f) * page.height
+                        val scale = widthPixels / regionWidth
+                        val height = (regionHeight * scale).roundToInt().coerceIn(1, MAX_REGION_HEIGHT)
+                        createBitmap(widthPixels, height, Bitmap.Config.ARGB_8888).also { bitmap ->
+                            bitmap.eraseColor(Color.WHITE)
+                            val transform = Matrix().apply {
+                                setScale(scale, scale)
+                                postTranslate(-rect.left * page.width * scale, -rect.top * page.height * scale)
+                            }
+                            page.render(bitmap, null, transform, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private val regionLock = Mutex()
+    private const val MAX_REGION_HEIGHT = 6000
 
     private fun isLightPaperPage(bitmap: Bitmap): Boolean {
         val columns = 48

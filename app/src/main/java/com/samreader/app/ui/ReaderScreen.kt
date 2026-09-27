@@ -59,6 +59,13 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.samreader.app.data.*
 import com.samreader.app.document.PdfPageRenderer
+import com.samreader.app.ui.reflow.ContentsSheet
+import com.samreader.app.ui.reflow.FigureViewer
+import com.samreader.app.ui.reflow.PageCrop
+import com.samreader.app.ui.reflow.ReadingStyleSheet
+import com.samreader.app.ui.reflow.ReflowReader
+import com.samreader.app.ui.reflow.ReflowScrollRequest
+import androidx.compose.runtime.saveable.rememberSaveable
 import java.io.ByteArrayOutputStream
 import kotlin.math.roundToInt
 import kotlinx.coroutines.launch
@@ -96,8 +103,59 @@ fun ReaderScreen(viewModel: ReaderViewModel, onBack: () -> Unit, onSettings: () 
         }
         pendingImage = null
     }
-    LaunchedEffect(listState) { snapshotFlow { listState.firstVisibleItemIndex }.collect(viewModel::setPage) }
-    Scaffold(topBar = {
+    val reading by viewModel.readingSettings.collectAsStateWithLifecycle()
+    val reflowDocument by viewModel.reflowDocument.collectAsStateWithLifecycle()
+    val sentenceTranslations by viewModel.sentenceTranslations.collectAsStateWithLifecycle()
+    val phone = LocalConfiguration.current.screenWidthDp < PHONE_WIDTH_DP
+    var readerMode by rememberSaveable { mutableStateOf(if (phone) ReaderMode.REFLOW else ReaderMode.PDF) }
+    var reflowTopSentence by rememberSaveable { mutableStateOf<String?>(null) }
+    var reflowScroll by remember { mutableStateOf<ReflowScrollRequest?>(null) }
+    var pendingPdfPage by remember { mutableStateOf<Int?>(null) }
+    var stylePreview by remember { mutableStateOf<ReadingSettings?>(null) }
+    var showStyle by remember { mutableStateOf(false) }
+    var showContents by remember { mutableStateOf(false) }
+    var figure by remember { mutableStateOf<PageCrop?>(null) }
+    var wordLookup by remember { mutableStateOf<WordLookup?>(null) }
+    val readingStyle = stylePreview ?: reading
+    LaunchedEffect(reading) { if (reading == stylePreview) stylePreview = null }
+
+    /** Switching views keeps the reading position: the page in view, or the sentence at the top. */
+    fun switchMode() {
+        if (readerMode == ReaderMode.PDF) {
+            val anchor = sentences.firstOrNull { it.decodedRegions(currentPage).isNotEmpty() }
+                ?: sentences.firstOrNull { it.pageNumber >= currentPage }
+            reflowScroll = anchor?.let { ReflowScrollRequest(it.id) }
+            readerMode = ReaderMode.REFLOW
+        } else {
+            pendingPdfPage = sentences.firstOrNull { it.id == reflowTopSentence }?.pageNumber ?: currentPage
+            readerMode = ReaderMode.PDF
+        }
+    }
+    fun toggleTapTarget() {
+        val next = if (reading.tapTarget == TapTarget.SENTENCE) TapTarget.WORD else TapTarget.SENTENCE
+        viewModel.updateReading(reading.copy(tapTarget = next))
+        viewModel.dismissSentence()
+    }
+    LaunchedEffect(readerMode, pendingPdfPage) {
+        val page = pendingPdfPage ?: return@LaunchedEffect
+        if (readerMode == ReaderMode.PDF) {
+            listState.scrollToItem(page)
+            pendingPdfPage = null
+        }
+    }
+    LaunchedEffect(listState) { snapshotFlow { listState.firstVisibleItemIndex }.collect { if (readerMode == ReaderMode.PDF) viewModel.setPage(it) } }
+    Scaffold(bottomBar = {
+        if (readerMode == ReaderMode.REFLOW) BottomAppBar {
+            listOf(
+                "目录" to { showContents = true },
+                "Aa" to { showStyle = true },
+                tapTargetLabel(reading.tapTarget) to ::toggleTapTarget,
+                "PDF 原版" to ::switchMode,
+            ).forEach { (label, action) ->
+                TextButton(onClick = action, modifier = Modifier.weight(1f)) { Text(label, maxLines = 1) }
+            }
+        }
+    }, topBar = {
         Column { TopAppBar(
             navigationIcon = { TextButton(onClick = onBack) { Text("返回") } },
             title = { Column {
@@ -105,10 +163,15 @@ fun ReaderScreen(viewModel: ReaderViewModel, onBack: () -> Unit, onSettings: () 
                 Text("${currentPage + 1} / ${document?.pageCount ?: 1} · ${statusText(document)}", style = MaterialTheme.typography.labelSmall)
             } },
             actions = {
-                InkToolMenu(ink, viewModel::updateInk)
+                val pdfMode = readerMode == ReaderMode.PDF
+                if (pdfMode) InkToolMenu(ink, viewModel::updateInk)
                 if (!compactToolbar) {
-                    TextButton(onClick = { zoom = 1f; scope.launch { horizontalState.scrollTo(0) } }) { Text("适配") }
-                    TextButton(onClick = { zoomLocked = !zoomLocked }) { Text(if (zoomLocked) "缩放锁" else "缩放开") }
+                    TextButton(onClick = ::switchMode) { Text(if (pdfMode) "阅读视图" else "PDF 原版") }
+                    TextButton(onClick = ::toggleTapTarget) { Text(tapTargetLabel(reading.tapTarget)) }
+                    if (pdfMode) {
+                        TextButton(onClick = { zoom = 1f; scope.launch { horizontalState.scrollTo(0) } }) { Text("适配") }
+                        TextButton(onClick = { zoomLocked = !zoomLocked }) { Text(if (zoomLocked) "缩放锁" else "缩放开") }
+                    }
                     when (document?.status) {
                         DocumentStatus.INDEXING, DocumentStatus.QUEUED -> {
                             TextButton(onClick = viewModel::pauseIndex) { Text("暂停") }
@@ -127,7 +190,7 @@ fun ReaderScreen(viewModel: ReaderViewModel, onBack: () -> Unit, onSettings: () 
                         ) { Text(fullTranslationActionLabel(document)) }
                     }
                     if (document?.aiContextStatus == AiContextStatus.FAILED) TextButton(onClick = viewModel::retryAiContext) { Text("AI 重析") }
-                    TextButton(onClick = { viewModel.undoStroke(currentPage) }) { Text("撤销") }
+                    if (pdfMode) TextButton(onClick = { viewModel.undoStroke(currentPage) }) { Text("撤销") }
                     TextButton(onClick = onVocabulary) { Text("生词") }
                     TextButton(onClick = onSettings) { Text("设置") }
                 } else {
@@ -137,75 +200,46 @@ fun ReaderScreen(viewModel: ReaderViewModel, onBack: () -> Unit, onSettings: () 
                             expanded = toolbarOverflowExpanded,
                             onDismissRequest = { toolbarOverflowExpanded = false },
                         ) {
-                            DropdownMenuItem(
-                                text = { Text("适配屏幕") },
+                            @Composable
+                            fun item(label: String, enabled: Boolean = true, action: () -> Unit) = DropdownMenuItem(
+                                text = { Text(label) },
+                                enabled = enabled,
                                 onClick = {
                                     toolbarOverflowExpanded = false
+                                    action()
+                                },
+                            )
+                            if (pdfMode) {
+                                item("阅读视图", action = ::switchMode)
+                                item(if (reading.tapTarget == TapTarget.SENTENCE) "点按改为选词" else "点按改为选句", action = ::toggleTapTarget)
+                                item("适配屏幕") {
                                     zoom = 1f
                                     scope.launch { horizontalState.scrollTo(0) }
-                                },
-                            )
-                            DropdownMenuItem(
-                                text = { Text(if (zoomLocked) "开启手势缩放" else "锁定缩放") },
-                                onClick = {
-                                    toolbarOverflowExpanded = false
-                                    zoomLocked = !zoomLocked
-                                },
-                            )
+                                }
+                                item(if (zoomLocked) "开启手势缩放" else "锁定缩放") { zoomLocked = !zoomLocked }
+                            }
                             when (document?.status) {
                                 DocumentStatus.INDEXING, DocumentStatus.QUEUED -> {
-                                    DropdownMenuItem(text = { Text("暂停解析") }, onClick = {
-                                        toolbarOverflowExpanded = false
-                                        viewModel.pauseIndex()
-                                    })
-                                    DropdownMenuItem(text = { Text("取消解析") }, onClick = {
-                                        toolbarOverflowExpanded = false
-                                        viewModel.cancelIndex()
-                                    })
+                                    item("暂停解析", action = viewModel::pauseIndex)
+                                    item("取消解析", action = viewModel::cancelIndex)
                                 }
                                 DocumentStatus.PAUSED -> {
-                                    DropdownMenuItem(text = { Text("继续解析") }, onClick = {
-                                        toolbarOverflowExpanded = false
-                                        viewModel.resumeIndex()
-                                    })
-                                    DropdownMenuItem(text = { Text("取消解析") }, onClick = {
-                                        toolbarOverflowExpanded = false
-                                        viewModel.cancelIndex()
-                                    })
+                                    item("继续解析", action = viewModel::resumeIndex)
+                                    item("取消解析", action = viewModel::cancelIndex)
                                 }
-                                else -> DropdownMenuItem(text = { Text("本地重新解析") }, onClick = {
-                                    toolbarOverflowExpanded = false
-                                    viewModel.retryLocalIndex()
-                                })
+                                else -> item("本地重新解析", action = viewModel::retryLocalIndex)
                             }
                             if (document?.status == DocumentStatus.READY) {
-                                DropdownMenuItem(
-                                    text = { Text(fullTranslationActionLabel(document)) },
+                                item(
+                                    fullTranslationActionLabel(document),
                                     enabled = document?.fullTranslationStatus != FullTranslationStatus.RUNNING,
-                                    onClick = {
-                                        toolbarOverflowExpanded = false
-                                        viewModel.startFullTranslation()
-                                    },
+                                    action = viewModel::startFullTranslation,
                                 )
                             }
-                            if (document?.aiContextStatus == AiContextStatus.FAILED) {
-                                DropdownMenuItem(text = { Text("AI 上下文重新解析") }, onClick = {
-                                    toolbarOverflowExpanded = false
-                                    viewModel.retryAiContext()
-                                })
-                            }
-                            DropdownMenuItem(text = { Text("撤销笔画") }, onClick = {
-                                toolbarOverflowExpanded = false
-                                viewModel.undoStroke(currentPage)
-                            })
-                            DropdownMenuItem(text = { Text("生词本") }, onClick = {
-                                toolbarOverflowExpanded = false
-                                onVocabulary()
-                            })
-                            DropdownMenuItem(text = { Text("设置") }, onClick = {
-                                toolbarOverflowExpanded = false
-                                onSettings()
-                            })
+                            if (document?.aiContextStatus == AiContextStatus.FAILED) item("AI 上下文重新解析", action = viewModel::retryAiContext)
+                            if (pdfMode) item("撤销笔画") { viewModel.undoStroke(currentPage) }
+                            item("生词本", action = onVocabulary)
+                            item("设置", action = onSettings)
                         }
                     }
                 }
@@ -228,7 +262,37 @@ fun ReaderScreen(viewModel: ReaderViewModel, onBack: () -> Unit, onSettings: () 
         }
     }) { padding ->
         val doc = document
+        val reflow = reflowDocument
         if (doc == null) Box(Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
+        else if (readerMode == ReaderMode.REFLOW) {
+            if (reflow == null || reflow.nodes.isEmpty()) {
+                Box(Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.Center) {
+                    if (reflow == null) CircularProgressIndicator()
+                    else Text("本地解析完成首页后即可在阅读视图中查看", style = MaterialTheme.typography.bodyMedium)
+                }
+            } else {
+                ReflowReader(
+                    document = reflow,
+                    filePath = doc.filePath,
+                    translations = sentenceTranslations,
+                    style = readingStyle,
+                    systemDark = isSystemInDarkTheme(),
+                    selectedSentenceId = selectedSentence?.id,
+                    scrollRequest = reflowScroll,
+                    onSentence = { id ->
+                        val sentence = id?.let { sentenceId -> sentences.firstOrNull { it.id == sentenceId } }
+                        if (sentence == null) viewModel.dismissSentence() else viewModel.selectSentence(sentence, sentence.pageNumber)
+                    },
+                    onWord = { word, sentenceId -> wordLookup = WordLookup(word, sentenceId) },
+                    onFigure = { figure = it },
+                    onTopSentence = { id ->
+                        reflowTopSentence = id
+                        sentences.firstOrNull { it.id == id }?.let { viewModel.setPage(it.pageNumber) }
+                    },
+                    modifier = Modifier.fillMaxSize().padding(padding),
+                )
+            }
+        }
         else BoxWithConstraints(Modifier.fillMaxSize().padding(padding)) {
             val viewportWidth = maxWidth
             val continuousWidth = maxWidth * zoom
@@ -267,12 +331,74 @@ fun ReaderScreen(viewModel: ReaderViewModel, onBack: () -> Unit, onSettings: () 
                                 layoutConfidence = layoutConfidence,
                                 onSelectionAnchor = { actionModeAnchorOnScreen = it },
                                 onSaveImage = { name, bytes -> pendingImage = bytes; imageSaver.launch(name) },
+                                tapTarget = reading.tapTarget,
+                                highlightedWord = wordLookup?.takeIf { it.page == page }?.rect,
+                                onWord = { word, sentenceId, rect -> wordLookup = WordLookup(word, sentenceId, page, rect) },
                             )
                         }
                     }
                 }
             }
         }
+    }
+    val filePath = document?.filePath
+    val sheetSentence = selectedSentence
+    if (readerMode == ReaderMode.REFLOW && sheetSentence != null && filePath != null) {
+        val notes by remember(sheetSentence.id) { viewModel.noteStrokes(sheetSentence.id) }.collectAsStateWithLifecycle(emptyList())
+        SentenceSheet(
+            sentence = sheetSentence,
+            filePath = filePath,
+            translation = translation,
+            notes = notes,
+            onTranslate = viewModel::translateSelected,
+            onRetry = viewModel::retryTranslation,
+            onSave = { viewModel.correctSentence(sheetSentence, it) },
+            onOpenNote = { onOpenNote(sheetSentence.id) },
+            onLocateInPdf = {
+                pendingPdfPage = sheetSentence.pageNumber
+                readerMode = ReaderMode.PDF
+            },
+            onDismiss = viewModel::dismissSentence,
+        )
+    }
+    wordLookup?.let { lookup ->
+        WordDialog(
+            lookup.word,
+            onDismiss = { wordLookup = null },
+            onLookup = { lookupDictionary(context, it) },
+            onSave = { word, note ->
+                viewModel.addVocabulary(word, note, lookup.sentenceId)
+                wordLookup = null
+            },
+        )
+    }
+    if (showStyle) {
+        ReadingStyleSheet(
+            settings = readingStyle,
+            onChange = { stylePreview = it },
+            onDismiss = {
+                showStyle = false
+                stylePreview?.let(viewModel::updateReading)
+            },
+        )
+    }
+    if (showContents) {
+        ContentsSheet(
+            headings = reflowDocument?.headings.orEmpty(),
+            onSelect = { heading ->
+                showContents = false
+                reflowScroll = ReflowScrollRequest(heading.id)
+            },
+            onDismiss = { showContents = false },
+        )
+    }
+    figure?.let { crop ->
+        if (filePath != null) FigureViewer(
+            filePath = filePath,
+            crop = crop,
+            onSave = { name, bytes -> pendingImage = bytes; imageSaver.launch(name) },
+            onDismiss = { figure = null },
+        )
     }
     SentenceSelectionActionMode(
         active = selectedSentenceIds.isNotEmpty(),
@@ -407,74 +533,6 @@ private fun AiCorrectionReviewDialog(
     )
 }
 
-@Composable
-private fun OriginalPdfSentenceCrops(filePath: String, sentence: SentenceEntity) {
-    var crops by remember(filePath, sentence.id, sentence.regions) { mutableStateOf<List<Pair<Int, Bitmap>>>(emptyList()) }
-    var error by remember(filePath, sentence.id, sentence.regions) { mutableStateOf<String?>(null) }
-    LaunchedEffect(filePath, sentence.id, sentence.regions) {
-        runCatching { renderOriginalPdfCrops(filePath, sentence) }
-            .onSuccess { rendered ->
-                crops.forEach { (_, bitmap) -> bitmap.takeUnless(Bitmap::isRecycled)?.recycle() }
-                crops = rendered
-                error = null
-            }
-            .onFailure { failure -> error = failure.message ?: "PDF 原图读取失败" }
-    }
-    DisposableEffect(filePath, sentence.id, sentence.regions) {
-        onDispose { crops.forEach { (_, bitmap) -> bitmap.takeUnless(Bitmap::isRecycled)?.recycle() } }
-    }
-    when {
-        error != null -> Text(error!!, color = MaterialTheme.colorScheme.error)
-        crops.isEmpty() -> Row(verticalAlignment = Alignment.CenterVertically) {
-            CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
-            Spacer(Modifier.width(8.dp))
-            Text("正在从 PDF 原页裁取…", style = MaterialTheme.typography.bodySmall)
-        }
-        else -> crops.forEach { (page, bitmap) ->
-            Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                Text("第 ${page + 1} 页原图", style = MaterialTheme.typography.labelSmall)
-                Image(
-                    bitmap = bitmap.asImageBitmap(),
-                    contentDescription = "第 ${page + 1} 页 PDF 原始内容",
-                    modifier = Modifier.fillMaxWidth().aspectRatio(bitmap.width.toFloat() / bitmap.height.coerceAtLeast(1)),
-                    contentScale = ContentScale.Fit,
-                )
-            }
-        }
-    }
-}
-
-private suspend fun renderOriginalPdfCrops(filePath: String, sentence: SentenceEntity): List<Pair<Int, Bitmap>> {
-    val pages = sentence.regions.split('|').mapNotNull { encoded ->
-        encoded.substringBefore(',').toIntOrNull()
-    }.distinct()
-    return pages.mapNotNull { page ->
-        val regions = sentence.decodedRegions(page)
-        if (regions.isEmpty()) return@mapNotNull null
-        val rendered = PdfPageRenderer.render(filePath, page, widthPixels = 1800, darkReading = false)
-        try {
-            val paddingX = .02f
-            val paddingY = .015f
-            val left = ((regions.minOf { it.left } - paddingX) * rendered.width).roundToInt()
-                .coerceIn(0, rendered.width - 1)
-            val top = ((regions.minOf { it.top } - paddingY) * rendered.height).roundToInt()
-                .coerceIn(0, rendered.height - 1)
-            val right = ((regions.maxOf { it.right } + paddingX) * rendered.width).roundToInt()
-                .coerceIn(left + 1, rendered.width)
-            val bottom = ((regions.maxOf { it.bottom } + paddingY) * rendered.height).roundToInt()
-                .coerceIn(top + 1, rendered.height)
-            val cropped = Bitmap.createBitmap(rendered, left, top, right - left, bottom - top)
-            page to if (cropped === rendered) {
-                rendered.copy(Bitmap.Config.ARGB_8888, false)
-            } else {
-                cropped
-            }
-        } finally {
-            rendered.recycle()
-        }
-    }
-}
-
 private fun highlightedReviewText(
     text: String,
     ranges: List<IntRange>,
@@ -586,8 +644,14 @@ private fun PdfPageItem(
     layoutConfidence: Float,
     onSelectionAnchor: (IntOffset) -> Unit,
     onSaveImage: (String, ByteArray) -> Unit,
+    tapTarget: TapTarget,
+    highlightedWord: NormalizedRect?,
+    onWord: (word: String, sentenceId: String?, rect: NormalizedRect) -> Unit,
 ) {
     val sentences = remember(allSentences, page) { allSentences.filter { it.decodedRegions(page).isNotEmpty() } }
+    val words by produceState(emptyList<PageWord>(), page, tapTarget) {
+        if (tapTarget == TapTarget.WORD) value = viewModel.wordsOnPage(page)
+    }
     val strokes by remember(page) { viewModel.strokes(page) }.collectAsStateWithLifecycle(emptyList())
     val layoutBlocks by remember(page) { viewModel.layoutBlocks(page) }.collectAsStateWithLifecycle(emptyList())
     val debugEvidence by remember(page) { viewModel.debugEvidence(page) }
@@ -629,6 +693,12 @@ private fun PdfPageItem(
             SentenceTouchLayer(
                 page, sentences, selected, selectedSentenceIds, noteSentenceIds,
                 imageBlocks = layoutBlocks.filter { it.type in IMAGE_BLOCK_TYPES },
+                highlightedWord = highlightedWord,
+                onWordTap = if (tapTarget == TapTarget.WORD) { x, y, width, height, radius ->
+                    val word = hitWord(words, x, y, width, height, radius)
+                    if (word == null) viewModel.dismissSentence()
+                    else onWord(word.text, hitSentence(sentences, page, x, y, width, height, radius)?.id, word.rect)
+                } else null,
                 onTap = { sentence ->
                     if (selectedSentenceIds.isEmpty()) viewModel.selectSentence(sentence, page)
                     else viewModel.toggleSentenceSelection(sentence, page)
@@ -859,6 +929,8 @@ private val IMAGE_BLOCK_TYPES = setOf(LayoutBlockType.IMAGE, LayoutBlockType.CHA
 private fun SentenceTouchLayer(
     page: Int, sentences: List<SentenceEntity>, selected: SentenceEntity?, selectedIds: Set<String>,
     noteSentenceIds: List<String>, imageBlocks: List<PageLayoutBlockEntity>,
+    highlightedWord: NormalizedRect?,
+    onWordTap: ((x: Float, y: Float, widthPx: Float, heightPx: Float, radiusPx: Float) -> Unit)?,
     onTap: (SentenceEntity) -> Unit, onLongPress: (SentenceEntity, IntOffset) -> Unit,
     onImageLongPress: (PageLayoutBlockEntity, IntOffset) -> Unit, onBlank: () -> Unit,
 ) {
@@ -873,6 +945,10 @@ private fun SentenceTouchLayer(
             )
             val normalizedX = x / layerSize.width
             val normalizedY = y / layerSize.height
+            if (!longPress && onWordTap != null) {
+                onWordTap(normalizedX, normalizedY, layerSize.width.toFloat(), layerSize.height.toFloat(), touchRadiusPx)
+                return@rememberUpdatedState
+            }
             if (longPress) {
                 imageBlocks.filter { normalizedX in it.left..it.right && normalizedY in it.top..it.bottom }
                     .minByOrNull { (it.right - it.left) * (it.bottom - it.top) }
@@ -936,6 +1012,9 @@ private fun SentenceTouchLayer(
         sentences.filter { it.id in selectedIds }.forEach { sentence -> sentence.decodedRegions(page).forEach { r ->
             drawRect(Color(0x664A90E2), Offset(r.left * size.width, r.top * size.height), Size((r.right-r.left)*size.width, (r.bottom-r.top)*size.height))
         } }
+        highlightedWord?.let { r ->
+            drawRect(Color(0x66C96B45), Offset(r.left * size.width, r.top * size.height), Size((r.right-r.left)*size.width, (r.bottom-r.top)*size.height))
+        }
     }
 }
 
@@ -984,7 +1063,8 @@ private fun TranslationPopup(
             Modifier
                 .offset { cardOffset }
                 .onSizeChanged { cardSize = it }
-                .width(540.dp)
+                .widthIn(max = 540.dp)
+                .fillMaxWidth()
                 .pointerInput(sentence.id) {
                 detectDragGestures { change, amount -> change.consume(); dragOffset = IntOffset(dragOffset.x + amount.x.roundToInt(), dragOffset.y + amount.y.roundToInt()) }
             },
@@ -1028,29 +1108,46 @@ private fun TranslationPopup(
                 }
             }
     }
-    wordDialog?.let { initial -> WordDialog(initial, onDismiss = { wordDialog = null }, onLookup = { lookupSamsungDictionary(context, it) }, onSave = { word, note -> onVocabulary(word, note); wordDialog = null }) }
+    wordDialog?.let { initial -> WordDialog(initial, onDismiss = { wordDialog = null }, onLookup = { lookupDictionary(context, it) }, onSave = { word, note -> onVocabulary(word, note); wordDialog = null }) }
 }
 
 @Composable
 private fun WordDialog(initial: String, onDismiss: () -> Unit, onLookup: (String) -> Unit, onSave: (String,String) -> Unit) {
     var word by remember(initial) { mutableStateOf(initial) }; var note by remember { mutableStateOf("") }
-    AlertDialog(onDismissRequest = onDismiss, title = { Text("Samsung 词典 / 生词本") }, text = {
+    AlertDialog(onDismissRequest = onDismiss, title = { Text("查词 / 生词本") }, text = {
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             OutlinedTextField(word, { word = it }, label = { Text("单词或短语") }, singleLine = true)
             OutlinedTextField(note, { note = it }, label = { Text("释义或备注（可选）") })
-            TextButton(onClick = { onLookup(word) }, enabled = word.isNotBlank()) { Text("用 Samsung 词典查看") }
+            TextButton(onClick = { onLookup(word) }, enabled = word.isNotBlank()) { Text("查词典") }
         }
     }, confirmButton = { TextButton(onClick = { onSave(word, note) }, enabled = word.isNotBlank()) { Text("加入生词本") } }, dismissButton = { TextButton(onClick = onDismiss) { Text("关闭") } })
 }
 
-fun lookupSamsungDictionary(context: Context, text: String) {
-    val intent = Intent(Intent.ACTION_PROCESS_TEXT).setType("text/plain").setPackage("com.diotek.sec.lookup.dictionary")
+/**
+ * Looks a word up with the Samsung dictionary on Samsung devices; elsewhere the system offers
+ * every installed app that handles selected text (dictionaries, translators).
+ */
+fun lookupDictionary(context: Context, text: String) {
+    val intent = Intent(Intent.ACTION_PROCESS_TEXT).setType("text/plain")
         .putExtra(Intent.EXTRA_PROCESS_TEXT, text.trim()).putExtra(Intent.EXTRA_PROCESS_TEXT_READONLY, true)
         .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-    runCatching { context.startActivity(intent) }.onFailure {
-        android.widget.Toast.makeText(context, "Samsung 词典不可用或尚未启用", android.widget.Toast.LENGTH_SHORT).show()
-    }
+    runCatching { context.startActivity(Intent(intent).setPackage(SAMSUNG_DICTIONARY)) }
+        .recoverCatching { context.startActivity(Intent.createChooser(intent, "查词").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
+        .onFailure {
+            android.widget.Toast.makeText(context, "没有可用的词典应用", android.widget.Toast.LENGTH_SHORT).show()
+        }
 }
+
+private const val SAMSUNG_DICTIONARY = "com.diotek.sec.lookup.dictionary"
+
+private enum class ReaderMode { PDF, REFLOW }
+
+/** Phones (compact width) open papers in the reading view. */
+private const val PHONE_WIDTH_DP = 600
+
+private data class WordLookup(val word: String, val sentenceId: String?, val page: Int? = null, val rect: NormalizedRect? = null)
+
+private fun tapTargetLabel(target: TapTarget) = if (target == TapTarget.SENTENCE) "点句" else "点词"
 
 internal fun hitSentence(
     sentences: List<SentenceEntity>,

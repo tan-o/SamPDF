@@ -139,6 +139,7 @@ private fun SamReaderApp(container: AppContainer) {
                                 settingsRepository = container.deepSeekSettings,
                                 inkRepository = container.inkSettings,
                                 parsingDebugRepository = container.parsingDebugSettings,
+                                readingRepository = container.readingSettings,
                             )
                         },
                     )

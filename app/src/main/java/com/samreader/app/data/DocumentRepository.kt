@@ -51,6 +51,17 @@ class DocumentRepository(
 
     fun observeSentence(id: String): Flow<SentenceEntity?> = dao.observeSentence(id)
 
+    fun observeDocumentPages(documentId: String): Flow<List<PageEntity>> = dao.observeDocumentPages(documentId)
+
+    fun observeDocumentLayoutBlocks(documentId: String): Flow<List<PageLayoutBlockEntity>> =
+        dao.observeDocumentLayoutBlocks(documentId)
+
+    fun observeDocumentTranslations(documentId: String): Flow<List<TranslationEntity>> =
+        dao.observeDocumentTranslations(documentId)
+
+    suspend fun pageWordEvidence(documentId: String, pageNumber: Int): List<PageEvidenceEntity> =
+        dao.getPageWordEvidence(documentId, pageNumber)
+
     fun observeSentenceNoteStrokes(id: String): Flow<List<SentenceNoteStrokeEntity>> =
         dao.observeSentenceNoteStrokes(id)
 

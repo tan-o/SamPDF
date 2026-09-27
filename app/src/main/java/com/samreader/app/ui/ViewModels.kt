@@ -9,10 +9,14 @@ import com.samreader.app.data.*
 import java.util.Locale
 import java.util.UUID
 import android.util.Log
+import com.samreader.app.ui.reflow.ReflowDocument
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class LibraryViewModel(private val repository: DocumentRepository) : ViewModel() {
     val documents = repository.documents.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
@@ -77,9 +81,11 @@ class ReaderViewModel(
     settingsRepository: DeepSeekSettingsRepository,
     private val inkRepository: InkSettingsRepository,
     private val parsingDebugRepository: ParsingDebugSettingsRepository,
+    private val readingRepository: ReadingSettingsRepository,
 ) : ViewModel() {
     val settings = settingsRepository.settings
     val inkSettings = inkRepository.settings
+    val readingSettings = readingRepository.settings
     val parsingDebugSettings = parsingDebugRepository.settings
     val layoutConfidence = parsingDebugRepository.documentLayoutConfidence(documentId)
         .stateIn(
@@ -90,6 +96,21 @@ class ReaderViewModel(
     val document = repository.observeDocument(documentId).stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
     val sentences = repository.observeDocumentSentences(documentId)
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+    /** The parsed paper as a reflowable document, rebuilt as indexing publishes pages. */
+    @OptIn(FlowPreview::class)
+    val reflowDocument = combine(
+        repository.observeDocumentSentences(documentId),
+        repository.observeDocumentLayoutBlocks(documentId),
+        repository.observeDocumentPages(documentId),
+    ) { sentences, blocks, pages -> ReflowDocument.build(sentences, blocks, pages) }.debounce(400).flowOn(Dispatchers.Default)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+
+    /** Stored translations that still match their sentence's current text, by sentence ID. */
+    val sentenceTranslations = combine(sentences, repository.observeDocumentTranslations(documentId)) { current, translations ->
+        val texts = current.associate { it.id to it.displayText }
+        translations.filter { texts[it.sentenceId] == it.sourceText }.associate { it.sentenceId to it.translatedText }
+    }.flowOn(Dispatchers.Default).stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyMap())
+
     val aiCorrectionReviews = repository.observeAiCorrectionReviews(documentId)
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
     val sentenceIdsWithNotes = repository.observeSentenceIdsWithNotes(documentId)
@@ -234,6 +255,10 @@ class ReaderViewModel(
         repository.addVocabulary(word, note, sentenceId)
     }
     fun updateInk(value: InkSettings) = viewModelScope.launch { inkRepository.update(value) }
+    fun updateReading(value: ReadingSettings) = viewModelScope.launch { readingRepository.update(value) }
+    suspend fun wordsOnPage(page: Int): List<PageWord> = withContext(Dispatchers.Default) {
+        pageWords(repository.pageWordEvidence(documentId, page))
+    }
     fun addStroke(page: Int, commit: InkCommit) {
         if (commit.points.size < 2) return
         viewModelScope.launch {

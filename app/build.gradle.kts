@@ -66,6 +66,7 @@ dependencies {
     ksp("androidx.room:room-compiler:2.8.4")
 
     implementation("androidx.work:work-runtime:2.11.2")
+    implementation("androidx.webkit:webkit:1.14.0")
     implementation("com.google.mlkit:text-recognition:16.0.1")
     implementation("com.microsoft.onnxruntime:onnxruntime-android:1.23.2")
     implementation("com.squareup.okhttp3:okhttp:5.3.0")

@@ -10,6 +10,7 @@ import com.samreader.app.data.TranslationRepository
 import com.samreader.app.data.InkSettingsRepository
 import com.samreader.app.data.IndexingSettingsRepository
 import com.samreader.app.data.ParsingDebugSettingsRepository
+import com.samreader.app.data.ReadingSettingsRepository
 
 class AppContainer(context: Context) {
     val database: AppDatabase = Room.databaseBuilder(
@@ -22,6 +23,7 @@ class AppContainer(context: Context) {
     val inkSettings = InkSettingsRepository(database.dao())
     val indexingSettings = IndexingSettingsRepository(database.dao())
     val parsingDebugSettings = ParsingDebugSettingsRepository(database.dao())
+    val readingSettings = ReadingSettingsRepository(database.dao())
 
     val documents = DocumentRepository(
         context = context,
