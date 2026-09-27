@@ -73,13 +73,15 @@ class DocumentIndexWorker(
             val rustPages = runCatching { RustPdfTextExtractor.extract(file.absolutePath) }
                 .onFailure { error -> Log.w("SamReaderIndex", "Rust PDF text extraction failed", error) }
                 .getOrDefault(emptyList())
+            val nativePages = rustPages.map { it.toPositionedLines() }
+            val furniture = RunningFurniture.detect(nativePages)
             ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY).use { descriptor ->
                 PdfRenderer(descriptor).use { renderer ->
                     for (pageNumber in startPage until renderer.pageCount) {
                         if (isStopped) return@withContext Result.success()
                         renderer.openPage(pageNumber).use { page ->
                             val rustPage = rustPages.getOrNull(pageNumber)
-                            val nativeLines = rustPage?.toPositionedLines().orEmpty()
+                            val nativeLines = nativePages.getOrNull(pageNumber).orEmpty()
                             val recognizedPage = recognizePage(page, recognizer, layoutConfidence, nativeLines)
                             val layoutBlocks = PageParser.parse(
                                 pageNumber = pageNumber,
@@ -87,6 +89,7 @@ class DocumentIndexWorker(
                                 nativeLines = nativeLines,
                                 ocrLines = recognizedPage.ocrLines,
                                 formulas = recognizedPage.formulas,
+                                furniture = furniture,
                             )
                             val committed = sentences.addPage(pageNumber, layoutBlocks).toMutableList()
                             if (pageNumber == renderer.pageCount - 1) committed += sentences.finish()

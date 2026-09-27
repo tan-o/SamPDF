@@ -41,7 +41,6 @@ h1 { font-size: 1.45em; line-height: 1.25; margin: .3em 0 .5em; }
 h2 { font-size: 1.12em; line-height: 1.35; margin: 1.7em 0 .5em; color: var(--accent); font-family: var(--ui-font); font-weight: 650; }
 p { margin: 0 0 .9em; }
 p.authors { font-family: var(--ui-font); font-size: .82em; color: var(--muted); margin: .1em 0; }
-p.meta { font-family: var(--ui-font); font-size: .75em; color: var(--muted); margin: 0 0 .3em; }
 
 section.abstract { background: var(--panel); border-radius: 12px; padding: .9em 1em .1em; margin: 1.1em 0 1.5em; }
 section.abstract p { font-size: .94em; }
@@ -54,7 +53,12 @@ figure img.visual { display: block; width: 100%; height: auto; border-radius: 8p
 :root[data-theme="dark"] figure img.visual { filter: brightness(.88); }
 figcaption { font-family: var(--ui-font); font-size: .82em; line-height: 1.5; color: var(--muted); margin: .6em .2em 0; }
 figcaption + img.visual { margin-top: .6em; }
-aside.note { font-size: .8em; line-height: 1.5; color: var(--muted); border-left: 3px solid var(--rule); padding-left: .8em; margin: .9em 0; }
+section.footnotes { border-top: 1px solid var(--rule); margin-top: 2em; }
+section.footnotes h2, details.back summary { font-size: .95em; color: var(--muted); }
+p.footnote { font-size: .8em; line-height: 1.5; color: var(--muted); margin: 0 0 .45em; }
+details.back { border-top: 1px solid var(--rule); margin-top: 1.6em; padding-top: .6em; }
+details.back summary { font-family: var(--ui-font); font-weight: 600; cursor: pointer; margin-bottom: .8em; }
+details.back p { font-size: .85em; color: var(--muted); }
 
 .eq { display: block; text-align: center; margin: .5em 0; overflow-x: auto; }
 .eq img { max-width: 100%; height: auto; vertical-align: middle; }

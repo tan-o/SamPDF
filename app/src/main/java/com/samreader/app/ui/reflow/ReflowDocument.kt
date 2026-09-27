@@ -37,9 +37,6 @@ sealed interface ReflowNode {
 
     /** Figures, charts or tables with their captions, in source reading order. */
     data class Figure(val parts: List<FigurePart>) : ReflowNode
-
-    /** Footnotes and side notes. */
-    data class Note(val sentences: List<SentenceEntity>) : ReflowNode
 }
 
 sealed interface FigurePart {
@@ -50,16 +47,24 @@ sealed interface FigurePart {
 /**
  * The parsed paper as a reflowable document, following the reading order of the layout model.
  *
+ * [nodes] is the reading flow: title, authors, abstract, headings, body paragraphs, figures,
+ * tables and equations, then the references. Page furniture (running heads and feet, page
+ * numbers, journal logos, sidebars, publication metadata above the title) is left out. As in
+ * EPUB conversion, [footnotes] are collected as endnotes, and [backMatter] holds what follows the
+ * references before any new heading (author biographies and their photos).
+ *
  * Paragraphs come from the layout blocks sentences start in: a sentence joins the open paragraph
  * when it starts in the same block, or in the block the previous sentence ran into (a paragraph
- * that continues across a column or page). Figures, tables, captions and footnotes are floats, as
+ * that continues across a column or page). Figures and tables with their captions are floats, as
  * in LaTeX or EPUB conversion: they are held back and placed at the next paragraph break, so they
- * never cut a sentence. [displayEquations] maps each display formula's LaTeX to its page region,
- * because the typeset PDF rendering is the faithful form of an equation.
+ * never cut a sentence, and never split the reference list. [displayEquations] maps each display
+ * formula's LaTeX to its page region, because the typeset PDF rendering is the faithful form.
  */
 class ReflowDocument(
     val nodes: List<ReflowNode>,
     val displayEquations: Map<String, PageCrop>,
+    val footnotes: List<SentenceEntity> = emptyList(),
+    val backMatter: List<ReflowNode> = emptyList(),
 ) {
     val headings: List<SentenceEntity>
         get() = nodes.filterIsInstance<ReflowNode.Heading>().filterNot { it.documentTitle }.map { it.sentence }
@@ -95,79 +100,81 @@ class ReflowDocument(
                 }
             }.sortedBy(Item::key)
 
-            val nodes = mutableListOf<ReflowNode>()
-            val floats = mutableListOf<Item>()
-            var paragraph: OpenParagraph? = null
+            val footnotes = items.filterIsInstance<Item.Text>().filter { it.role == SemanticTextRole.FOOTNOTE }.map { it.sentence }
+            val flow = items.filterNot { it is Item.Text && it.role in OUTSIDE_FLOW_ROLES }
+            // Back matter: whatever follows the last reference entry, up to the next heading.
+            val lastReference = flow.indexOfLast { it is Item.Text && it.role == SemanticTextRole.REFERENCE }
+            val backEnd = if (lastReference < 0) lastReference else flow.withIndex()
+                .firstOrNull { (index, item) -> index > lastReference && item is Item.Text && item.role == SemanticTextRole.TITLE }
+                ?.index ?: flow.size
+            val back = if (lastReference < 0) emptyList() else flow.subList(lastReference + 1, backEnd)
+            val main = if (lastReference < 0) flow else flow.subList(0, lastReference + 1) + flow.subList(backEnd, flow.size)
 
-            fun flushFloats() {
-                var figure = mutableListOf<FigurePart>()
-                var notes = mutableListOf<SentenceEntity>()
-                fun emitFigure() { if (figure.isNotEmpty()) nodes += ReflowNode.Figure(figure); figure = mutableListOf() }
-                fun emitNotes() { if (notes.isNotEmpty()) nodes += ReflowNode.Note(notes); notes = mutableListOf() }
-                floats.forEach { item ->
-                    val part = when (item) {
-                        is Item.Visual -> FigurePart.Visual(item.block.crop(), item.block.type)
-                        is Item.Text -> if (item.role == SemanticTextRole.CAPTION) FigurePart.Caption(item.sentence) else null
+            fun buildNodes(items: List<Item>): List<ReflowNode> {
+                val nodes = mutableListOf<ReflowNode>()
+                val floats = mutableListOf<Item>()
+                var paragraph: OpenParagraph? = null
+
+                fun flushFloats() {
+                    var figure = mutableListOf<FigurePart>()
+                    fun emitFigure() { if (figure.isNotEmpty()) nodes += ReflowNode.Figure(figure); figure = mutableListOf() }
+                    floats.forEach { item ->
+                        val part = when (item) {
+                            is Item.Visual -> FigurePart.Visual(item.block.crop(), item.block.type)
+                            is Item.Text -> FigurePart.Caption(item.sentence)
+                        }
+                        // One figure is visuals plus their caption; a new visual after a caption (or a
+                        // new caption after a visual that followed a caption) starts the next figure.
+                        val complete = figure.any { it is FigurePart.Visual } && figure.any { it is FigurePart.Caption }
+                        if (complete && figure.last()::class != part::class) emitFigure()
+                        figure += part
                     }
-                    if (part == null) {
-                        emitFigure()
-                        notes += (item as Item.Text).sentence
-                        return@forEach
-                    }
-                    emitNotes()
-                    // One figure is visuals plus their caption; a new visual after a caption (or a
-                    // new caption after a visual that followed a caption) starts the next figure.
-                    val complete = figure.any { it is FigurePart.Visual } && figure.any { it is FigurePart.Caption }
-                    if (complete && figure.last()::class != part::class) emitFigure()
-                    figure += part
+                    emitFigure()
+                    floats.clear()
                 }
-                emitFigure()
-                emitNotes()
-                floats.clear()
-            }
 
-            fun closeParagraph() {
-                paragraph?.let { nodes += ReflowNode.Paragraph(it.role, it.sentences) }
-                paragraph = null
-                flushFloats()
-            }
+                fun closeParagraph(flush: Boolean = true) {
+                    paragraph?.let { nodes += ReflowNode.Paragraph(it.role, it.sentences) }
+                    paragraph = null
+                    if (flush) flushFloats()
+                }
 
-            items.forEach { item ->
-                when {
-                    item is Item.Visual -> floats += item
-                    item !is Item.Text -> Unit
-                    item.role == SemanticTextRole.CAPTION ||
-                        item.role == SemanticTextRole.FOOTNOTE ||
-                        item.role == SemanticTextRole.SIDEBAR -> floats += item
-                    item.role == SemanticTextRole.FOOTER -> Unit
-                    item.role == SemanticTextRole.TITLE -> {
-                        closeParagraph()
-                        nodes += ReflowNode.Heading(item.sentence, item.block?.type == LayoutBlockType.DOCUMENT_TITLE)
-                    }
-                    item.role == SemanticTextRole.CONTENTS -> {
-                        closeParagraph()
-                        nodes += ReflowNode.Paragraph(item.role, listOf(item.sentence))
-                    }
-                    else -> {
-                        val open = paragraph
-                        val continues = open != null && open.role == item.role && item.block != null &&
-                            (item.block == open.block || open.sentences.last().touches(item.block))
-                        if (continues) {
-                            open!!.sentences += item.sentence
-                            open.block = item.block
-                        } else {
+                items.forEach { item ->
+                    when {
+                        item is Item.Visual -> floats += item
+                        item !is Item.Text -> Unit
+                        item.role == SemanticTextRole.CAPTION -> floats += item
+                        item.role == SemanticTextRole.TITLE -> {
                             closeParagraph()
-                            paragraph = OpenParagraph(item.role, mutableListOf(item.sentence), item.block)
+                            nodes += ReflowNode.Heading(item.sentence, item.block?.type == LayoutBlockType.DOCUMENT_TITLE)
+                        }
+                        item.role == SemanticTextRole.CONTENTS -> {
+                            closeParagraph()
+                            nodes += ReflowNode.Paragraph(item.role, listOf(item.sentence))
+                        }
+                        else -> {
+                            val open = paragraph
+                            val continues = open != null && open.role == item.role && item.block != null &&
+                                (item.block == open.block || open.sentences.last().touches(item.block))
+                            if (continues) {
+                                open!!.sentences += item.sentence
+                                open.block = item.block
+                            } else {
+                                val withinReferences = open?.role == SemanticTextRole.REFERENCE && item.role == SemanticTextRole.REFERENCE
+                                closeParagraph(flush = !withinReferences)
+                                paragraph = OpenParagraph(item.role, mutableListOf(item.sentence), item.block)
+                            }
                         }
                     }
                 }
+                closeParagraph()
+                return nodes
             }
-            closeParagraph()
 
             val displayEquations = blocks
                 .filter { it.type == LayoutBlockType.EQUATION && it.text.startsWith("\\[") }
                 .associate { equation -> equation.text to equation.crop(numberOf(equation, blocksByPage[equation.pageNumber].orEmpty())) }
-            return ReflowDocument(nodes, displayEquations)
+            return ReflowDocument(buildNodes(main), displayEquations, footnotes, buildNodes(back))
         }
 
         private data class OrderKey(val page: Int, val block: Int, val position: Int) : Comparable<OrderKey> {
@@ -243,6 +250,11 @@ class ReflowDocument(
         }
 
         private val VISUAL_TYPES = setOf(LayoutBlockType.IMAGE, LayoutBlockType.CHART, LayoutBlockType.TABLE)
+
+        /** Page furniture and notes: never part of the reading flow. */
+        private val OUTSIDE_FLOW_ROLES = setOf(
+            SemanticTextRole.FOOTNOTE, SemanticTextRole.HEADER, SemanticTextRole.FOOTER, SemanticTextRole.SIDEBAR,
+        )
         private const val EDGE = .004f
         private const val NUMBER_GAP = .3f
         private const val GLYPH_BOX_EM = 1.15f

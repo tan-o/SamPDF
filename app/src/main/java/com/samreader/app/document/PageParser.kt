@@ -13,8 +13,9 @@ internal object PageParser {
         nativeLines: List<PositionedLine>,
         ocrLines: List<PositionedLine>,
         formulas: List<RecognizedFormula>,
+        furniture: RunningFurniture = RunningFurniture.NONE,
     ): List<PositionedBlock> {
-        val canonicalText = resolveCanonicalText(regions, nativeLines, ocrLines)
+        val canonicalText = resolveCanonicalText(regions, nativeLines, ocrLines).withoutFurniture(furniture)
         val nativeBlocks = assignLinesToRegions(regions, nativeLines)
         val ownedFormulas = assignFormulasToRegions(regions, formulas)
         val blocks = assembleTypedSpans(canonicalText, ownedFormulas).mapIndexed { index, block ->
@@ -82,6 +83,15 @@ internal object PageParser {
         val overlap = (minOf(block.right, formula.right) - maxOf(block.left, formula.left)).coerceAtLeast(0f)
         return overlap / (formula.right - formula.left).coerceAtLeast(.001f)
     }
+
+    /** Running heads read as text by the layout model lose those lines; an emptied block is furniture. */
+    private fun CanonicalPageText.withoutFurniture(furniture: RunningFurniture) = copy(
+        blocks = blocks.map { block ->
+            if (!block.selectableBody || block.lines.none(furniture::isFurniture)) return@map block
+            val kept = block.lines.filterNot(furniture::isFurniture)
+            if (kept.isEmpty()) block.copy(lines = emptyList(), selectableBody = false, type = LayoutBlockType.HEADER) else block.copy(lines = kept)
+        },
+    )
 
     /** A display formula becomes one `\[LaTeX\]` line: visual recognition first, else its native PDF text. */
     private fun encodeDisplayFormula(

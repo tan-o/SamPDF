@@ -22,6 +22,30 @@ object ReflowHtml {
         append("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">")
         append("<link rel=\"stylesheet\" href=\"katex/katex.min.css\"><link rel=\"stylesheet\" href=\"reflow.css\">")
         append("</head><body><article id=\"doc\">")
+        nodes(document.nodes, document, translations, cropUrl)
+        if (document.footnotes.isNotEmpty()) {
+            append("<section class=\"footnotes\"><h2>脚注</h2>")
+            document.footnotes.forEach { note ->
+                append("<p class=\"footnote\">")
+                sentence(note, document, translations, cropUrl)
+                append("</p>")
+            }
+            append("</section>")
+        }
+        if (document.backMatter.isNotEmpty()) {
+            append("<details class=\"back\"><summary>其他内容（作者简介等）</summary>")
+            nodes(document.backMatter, document, translations, cropUrl)
+            append("</details>")
+        }
+        append("</article><script src=\"katex/katex.min.js\"></script><script src=\"reflow.js\"></script></body></html>")
+    }
+
+    private fun StringBuilder.nodes(
+        nodes: List<ReflowNode>,
+        document: ReflowDocument,
+        translations: Map<String, String>,
+        cropUrl: (PageCrop) -> String,
+    ) {
         var openSection: String? = null
         fun section(name: String?) {
             if (openSection == name) return
@@ -29,7 +53,7 @@ object ReflowHtml {
             if (name != null) append("<section class=\"").append(name).append("\">")
             openSection = name
         }
-        document.nodes.forEach { node ->
+        nodes.forEach { node ->
             section(
                 when {
                     node is ReflowNode.Paragraph && node.role == SemanticTextRole.ABSTRACT -> "abstract"
@@ -75,18 +99,9 @@ object ReflowHtml {
                     if (captionOpen) append("</figcaption>")
                     append("</figure>")
                 }
-                is ReflowNode.Note -> {
-                    append("<aside class=\"note\">")
-                    node.sentences.forEachIndexed { index, sentence ->
-                        if (index > 0) append(' ')
-                        sentence(sentence, document, translations, cropUrl)
-                    }
-                    append("</aside>")
-                }
             }
         }
         section(null)
-        append("</article><script src=\"katex/katex.min.js\"></script><script src=\"reflow.js\"></script></body></html>")
     }
 
     private fun StringBuilder.sentence(
@@ -136,7 +151,6 @@ object ReflowHtml {
 
     private val PARAGRAPH_CLASSES = mapOf(
         SemanticTextRole.AUTHOR to "authors",
-        SemanticTextRole.HEADER to "meta",
         SemanticTextRole.REFERENCE to "ref",
         SemanticTextRole.CONTENTS to "entry",
     )

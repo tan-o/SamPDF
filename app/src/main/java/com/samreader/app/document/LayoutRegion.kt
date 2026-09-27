@@ -29,11 +29,12 @@ data class LayoutRegion(
         "footnote", "vision_footnote" -> LayoutBlockType.FOOTNOTE
         "aside_text" -> LayoutBlockType.SIDEBAR
         "figure_title" -> LayoutBlockType.CAPTION
-        "image", "header_image", "footer_image", "seal" -> LayoutBlockType.IMAGE
+        "image", "seal" -> LayoutBlockType.IMAGE
         "chart" -> LayoutBlockType.CHART
         "table" -> LayoutBlockType.TABLE
-        "header" -> LayoutBlockType.HEADER
-        "footer" -> LayoutBlockType.FOOTER
+        // Logos and emblems in the page margins are page furniture, not figures.
+        "header", "header_image" -> LayoutBlockType.HEADER
+        "footer", "footer_image" -> LayoutBlockType.FOOTER
         "number" -> LayoutBlockType.PAGE_NUMBER
         "display_formula", "inline_formula", "formula_number" -> LayoutBlockType.EQUATION
         else -> LayoutBlockType.PARAGRAPH

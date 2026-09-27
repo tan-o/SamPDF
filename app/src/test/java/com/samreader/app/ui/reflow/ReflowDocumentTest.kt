@@ -111,6 +111,72 @@ class ReflowDocumentTest {
         assertEquals((.904f - .296f) * 612f / (10f / 1.15f), crop.widthEm, .2f)
     }
 
+    @Test
+    fun pageFurnitureAndFootnotesStayOutOfTheReadingFlow() {
+        val document = build(
+            listOf(
+                sentence("journal", 0, 0, line(0, .02f), role = SemanticTextRole.HEADER),
+                sentence("body", 0, 10, line(0, .20f)),
+                sentence("note", 0, 20, line(0, .85f), role = SemanticTextRole.FOOTNOTE),
+                sentence("stamp", 0, 30, line(0, .50f, .01f, .03f), role = SemanticTextRole.SIDEBAR),
+                sentence("more", 0, 40, line(0, .25f)),
+            ),
+            listOf(
+                block(0, .01f, .05f, type = LayoutBlockType.HEADER),
+                block(1, .18f, .30f),
+                block(2, .84f, .88f, type = LayoutBlockType.FOOTNOTE),
+                block(3, .40f, .60f, left = .0f, right = .04f, type = LayoutBlockType.SIDEBAR),
+            ),
+        )
+
+        assertEquals(listOf(listOf("body", "more")), paragraphs(document))
+        assertEquals(listOf("note"), document.footnotes.map { it.id })
+    }
+
+    @Test
+    fun referencesAreNotSplitByFloatsAndBiographiesBecomeBackMatter() {
+        val document = build(
+            listOf(
+                sentence("ref1", 0, 0, line(0, .10f), role = SemanticTextRole.REFERENCE),
+                sentence("cap", 0, 5, line(0, .32f), role = SemanticTextRole.CAPTION),
+                sentence("ref2", 0, 10, line(0, .40f), role = SemanticTextRole.REFERENCE),
+                sentence("bio", 0, 20, line(0, .80f)),
+            ),
+            listOf(
+                block(0, .08f, .14f, type = LayoutBlockType.REFERENCE),
+                block(1, .16f, .30f, type = LayoutBlockType.TABLE),
+                block(2, .31f, .34f, type = LayoutBlockType.CAPTION),
+                block(3, .38f, .44f, type = LayoutBlockType.REFERENCE),
+                block(4, .60f, .75f, type = LayoutBlockType.IMAGE),
+                block(5, .78f, .90f),
+            ),
+        )
+
+        assertEquals(listOf(listOf("ref1"), listOf("ref2")), paragraphs(document))
+        assertTrue(document.nodes.last() is ReflowNode.Figure)
+        assertEquals(listOf("bio"), document.backMatter.filterIsInstance<ReflowNode.Paragraph>().flatMap { p -> p.sentences.map { it.id } })
+        assertTrue(document.backMatter.first() is ReflowNode.Figure)
+    }
+
+    @Test
+    fun anAppendixHeadingAfterTheReferencesReturnsToTheReadingFlow() {
+        val document = build(
+            listOf(
+                sentence("ref", 0, 0, line(0, .10f), role = SemanticTextRole.REFERENCE),
+                sentence("appendix", 0, 10, line(0, .30f), role = SemanticTextRole.TITLE),
+                sentence("proof", 0, 20, line(0, .40f)),
+            ),
+            listOf(
+                block(0, .08f, .14f, type = LayoutBlockType.REFERENCE),
+                block(1, .28f, .33f, type = LayoutBlockType.SECTION_TITLE),
+                block(2, .38f, .50f),
+            ),
+        )
+
+        assertEquals(listOf(listOf("ref"), listOf("proof")), paragraphs(document))
+        assertTrue(document.backMatter.isEmpty())
+    }
+
     private fun build(sentences: List<SentenceEntity>, blocks: List<PageLayoutBlockEntity>) =
         ReflowDocument.build(sentences, blocks, listOf(PageEntity("d", 0, 612f, 792f, "", 1f)))
 
